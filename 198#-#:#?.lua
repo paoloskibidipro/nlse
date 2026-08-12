@@ -1003,10 +1003,14 @@ KillerHub:AddTask(function()
     getgenv().__KillerHub_Combined_Loaded = nil
 end)
 
+-- Notification
+KillerHub:NotifySuccess("Killer Hub", "script working correctly", 3)
 
 --==============================================================================
--- 🔪 MM2 ADVANCED PLAYER UTILITIES — KILLER HUB
+-- 🔪 MM2 ADVANCED UTILITIES & BOMB JUMP — KILLER HUB
 --==============================================================================
+
+-- Cargar librería con fallback seguro (Loadstring del archivo Player)
 
 
 if not KillerHub then
@@ -1015,11 +1019,20 @@ if not KillerHub then
 end
 
 -- Prevenir doble ejecución
-if getgenv().__MM2AdvancedScript_Loaded then
+if getgenv().__MM2CombinedScript_Loaded then
     KillerHub:NotifyWarn("Alerta", "El script ya se está ejecutando.", 3)
     return
 end
-getgenv().__MM2AdvancedScript_Loaded = true
+getgenv().__MM2CombinedScript_Loaded = true
+
+-- Servicios (Locales para acceso ultrarrápido)
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
 
 -- Helper para consultar flags de forma segura
 local function GetFlag(name, default)
@@ -1028,24 +1041,387 @@ local function GetFlag(name, default)
     return f.CurrentValue
 end
 
--- Servicios
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local LocalPlayer = Players.LocalPlayer
+--==============================================================================
+-- 📊 VARIABLES GLOBAL Y CONFIGURACIÓN BOMB JUMP
+--==============================================================================
+local POTENCIA_SALTO = 58
+local UMBRAL_ARRASTRE = 8
 
--- Variables de Estado
+-- Normal Bomb
+local CooldownNormalTime = 22.0
+local CooldownFinNormal = 0
+local NormalActivo = false
+local AutoEquipNormalActivo = false
+local LockNormal = false
+local BotonSizeNormalActual = 100
+local ARCHIVO_POS_NORMAL = "KillerHub_NormalPosConfig.json"
+
+-- Gold Bomb
+local CooldownGoldTime = 3.0
+local CooldownFinGold = 0
+local GoldActivo = false
+local AutoEquipGoldActivo = false
+local LockGold = false
+local BotonSizeGoldActual = 100
+local ARCHIVO_POS_GOLD = "KillerHub_GoldPosConfig.json"
+
+-- Diamond Bomb
+local CooldownDiamondTime = 5.5
+local CooldownFinDiamond = 0
+local DiamondActivo = false
+local AutoEquipDiamondActivo = false
+local LockDiamond = false
+local BotonSizeDiamondActual = 100
+local ARCHIVO_POS_DIAMOND = "KillerHub_DiamondPosConfig.json"
+
+-- UI Flotantes y Conexiones
+local ScreenGuiNormal, BotonNormal
+local ScreenGuiGold, BotonGold
+local ScreenGuiDiamond, BotonDiamond
+local ID_Generacion_Actual = 0
+
+local DragConnections = { Normal = {}, Gold = {}, Diamond = {} }
+
+-- Variables de Estado Player
 local NoclipConnection = nil
 local InvisConnection = nil
 local AntiFlingConnection = nil
 local invisParts = {}
 local speedGlitchLooping = false
 
+-- Constante reutilizable para evitar recolección de basura
+local VECTOR3_ZERO = Vector3.zero
+
 --==============================================================================
--- CORE UTILITY FUNCTIONS
+-- 💾 SISTEMA DE CONFIGURACIÓN BOMB JUMP
+--==============================================================================
+local function guardarPosicionBoton(archivo, xScale, xOffset, yScale, yOffset)
+    if not writefile then return end
+    pcall(writefile, archivo, HttpService:JSONEncode({
+        X_Scale = xScale, X_Offset = xOffset, Y_Scale = yScale, Y_Offset = yOffset
+    }))
+end
+
+local function cargarPosicionBoton(archivo, defX, defY)
+    local pos = {ScaleX = defX, OffsetX = -50, ScaleY = defY, OffsetY = -50}
+    if readfile and isfile and isfile(archivo) then
+        pcall(function()
+            local decoded = HttpService:JSONDecode(readfile(archivo))
+            if decoded then
+                pos.ScaleX = decoded.X_Scale or pos.ScaleX
+                pos.OffsetX = decoded.X_Offset or pos.OffsetX
+                pos.ScaleY = decoded.Y_Scale or pos.ScaleY
+                pos.OffsetY = decoded.Y_Offset or pos.OffsetY
+            end
+        end)
+    end
+    return pos
+end
+
+-- Estilo Liquid Glass
+local function AplicarEstiloLiquidGlass(boton, colorBordeText)
+    boton.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    boton.BackgroundTransparency = 0.35
+    boton.Font = Enum.Font.GothamBlack
+    boton.TextSize = 12
+    boton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    boton.TextStrokeTransparency = 1
+    boton.BorderSizePixel = 0
+    boton.Active = true
+
+    local corner = boton:FindFirstChildOfClass("UICorner") or Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 18)
+    corner.Parent = boton
+
+    local stroke = boton:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke")
+    stroke.Thickness = 1.5
+    stroke.Color = colorBordeText
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.Parent = boton
+end
+
+-- Limpieza estricta de eventos para prevenir memory leaks / lag de FPS
+local function LimpiarConexionesDrag(tipo)
+    if DragConnections[tipo] then
+        for i = 1, #DragConnections[tipo] do
+            local conn = DragConnections[tipo][i]
+            if conn and conn.Connected then conn:Disconnect() end
+        end
+        table.clear(DragConnections[tipo])
+    end
+end
+
+local function ConfigurarArrastreYClick(boton, archivoConfig, getLockState, accionClick, tipoKey)
+    LimpiarConexionesDrag(tipoKey)
+
+    local dragging = false
+    local wasDragged = false
+    local dragInputObject = nil
+    local dragStart = VECTOR3_ZERO
+    local startPos = UDim2.new()
+
+    local connBegan = boton.InputBegan:Connect(function(input)
+        if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+            dragging = true
+            wasDragged = false
+            dragInputObject = input
+            dragStart = input.Position
+            startPos = boton.Position
+        end
+    end)
+
+    local connChanged = UserInputService.InputChanged:Connect(function(input)
+        if dragging and input == dragInputObject then
+            local delta = input.Position - dragStart
+            if delta.Magnitude > UMBRAL_ARRASTRE then
+                wasDragged = true
+                if not (getLockState and getLockState()) then
+                    boton.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+                end
+            end
+        end
+    end)
+
+    local connEnded = UserInputService.InputEnded:Connect(function(input)
+        if input == dragInputObject and dragging then
+            dragging = false
+            dragInputObject = nil
+
+            if wasDragged then
+                if not (getLockState and getLockState()) then
+                    guardarPosicionBoton(archivoConfig, boton.Position.X.Scale, boton.Position.X.Offset, boton.Position.Y.Scale, boton.Position.Y.Offset)
+                end
+            else
+                if accionClick then accionClick() end
+            end
+        end
+    end)
+
+    table.insert(DragConnections[tipoKey], connBegan)
+    table.insert(DragConnections[tipoKey], connChanged)
+    table.insert(DragConnections[tipoKey], connEnded)
+end
+
+-- Loop de cooldowns
+local function IniciarLoopCooldown(boton, tiempoFin, textoBase, colorBase, idGen)
+    task.spawn(function()
+        while os.clock() < tiempoFin and idGen == ID_Generacion_Actual do
+            if boton and boton.Parent then
+                local restante = tiempoFin - os.clock()
+                boton.Text = string.format("%.1fs", math.max(0, restante))
+                boton.TextColor3 = Color3.fromRGB(160, 160, 160)
+            else
+                break
+            end
+            task.wait(0.1)
+        end
+        if boton and boton.Parent and idGen == ID_Generacion_Actual then
+            boton.Text = textoBase
+            boton.TextColor3 = Color3.fromRGB(255, 255, 255)
+        end
+    end)
+end
+
+--==============================================================================
+-- 📦 LÓGICA BOMB JUMP (INVENTARIO Y EJECUCIÓN)
+--==============================================================================
+local function ObtenerOVerificarBombaEnInventario(nombreBomba)
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if not char or not backpack then return nil end
+
+    local bomba = char:FindFirstChild(nombreBomba) or backpack:FindFirstChild(nombreBomba)
+    if bomba then return bomba end
+
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    local extras = remotes and remotes:FindFirstChild("Extras")
+    local remoteToy = extras and extras:FindFirstChild("ReplicateToy")
+
+    if remoteToy then
+        pcall(function() remoteToy:InvokeServer(nombreBomba) end)
+    end
+
+    return nil
+end
+
+-- Bucle pasivo optimizado para AutoEquip
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if AutoEquipNormalActivo or AutoEquipGoldActivo or AutoEquipDiamondActivo then
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            
+            if hum and hum.Health > 0 then
+                if AutoEquipNormalActivo and NormalActivo then ObtenerOVerificarBombaEnInventario("FakeBomb") end
+                if AutoEquipGoldActivo and GoldActivo then ObtenerOVerificarBombaEnInventario("GoldBomb") end
+                if AutoEquipDiamondActivo and DiamondActivo then ObtenerOVerificarBombaEnInventario("DiamondBomb") end
+            end
+        end
+    end
+end)
+
+local function PrepararBombaParaSalto(nombreBomba, autoEquip)
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if not char or not backpack then return nil end
+
+    local bomba = char:FindFirstChild(nombreBomba)
+    if bomba then return bomba end
+
+    bomba = backpack:FindFirstChild(nombreBomba)
+    if not bomba and autoEquip then
+        bomba = ObtenerOVerificarBombaEnInventario(nombreBomba)
+    end
+
+    if bomba and bomba.Parent == backpack then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then hum:EquipTool(bomba) end
+    end
+
+    return bomba
+end
+
+local function EjecutarBombJumpGenerico(bombaNombre, cooldownTime, refCooldownFin, refActivo, autoEquip, boton, textoBase, colorBase)
+    if os.clock() < refCooldownFin or not refActivo then return refCooldownFin end
+    
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not (hum and root and hum.Health > 0) then return refCooldownFin end
+
+    local bomba = PrepararBombaParaSalto(bombaNombre, autoEquip)
+    if not bomba then return refCooldownFin end
+
+    local remote = bomba:FindFirstChild("Remote") or bomba:FindFirstChildWhichIsA("RemoteEvent", true)
+    if remote then
+        local nuevoCooldown = os.clock() + cooldownTime
+        IniciarLoopCooldown(boton, nuevoCooldown, textoBase, colorBase, ID_Generacion_Actual)
+
+        task.spawn(function()
+            -- 1. PRIMERO: Tirar / Soltar Bomba
+            pcall(function()
+                if bomba:FindFirstChild("Activate") then bomba:Activate() end
+                remote:FireServer(CFrame.new(root.Position - Vector3.new(0, 3, 0)), 50)
+            end)
+            
+            -- 2. MICRO-PAUSA DE SINCRONIZACIÓN (0.09s)
+            task.wait(0.09)
+            
+            -- 3. SEGUNDO: Aplicar Salto
+            if char and root and root.Parent and hum.Health > 0 then
+                local velActual = root.AssemblyLinearVelocity
+                root.AssemblyLinearVelocity = Vector3.new(velActual.X, POTENCIA_SALTO, velActual.Z)
+                hum:ChangeState(Enum.HumanoidStateType.Jumping)
+            end
+        end)
+        return nuevoCooldown
+    end
+    return refCooldownFin
+end
+
+local function EjecutarNormalBombJump()
+    CooldownFinNormal = EjecutarBombJumpGenerico("FakeBomb", CooldownNormalTime, CooldownFinNormal, NormalActivo, AutoEquipNormalActivo, BotonNormal, "BOMB JUMP", Color3.fromRGB(255, 255, 255))
+end
+
+local function EjecutarGoldBombJump()
+    CooldownFinGold = EjecutarBombJumpGenerico("GoldBomb", CooldownGoldTime, CooldownFinGold, GoldActivo, AutoEquipGoldActivo, BotonGold, "GOLD JUMP", Color3.fromRGB(255, 215, 0))
+end
+
+local function EjecutarDiamondBombJump()
+    CooldownFinDiamond = EjecutarBombJumpGenerico("DiamondBomb", CooldownDiamondTime, CooldownFinDiamond, DiamondActivo, AutoEquipDiamondActivo, BotonDiamond, "DIAMOND JUMP", Color3.fromRGB(0, 191, 255))
+end
+
+--==============================================================================
+-- 🔳 CREACIÓN DE BOTONES FLOTANTES
+--==============================================================================
+local function CrearBotonNormal()
+    if CoreGui:FindFirstChild("KillerHub_NormalJump") then CoreGui.KillerHub_NormalJump:Destroy() end
+    ScreenGuiNormal = Instance.new("ScreenGui", CoreGui)
+    ScreenGuiNormal.Name = "KillerHub_NormalJump"
+    ScreenGuiNormal.ResetOnSpawn = false
+    
+    local pos = cargarPosicionBoton(ARCHIVO_POS_NORMAL, 0.6, 0.7)
+    BotonNormal = Instance.new("TextButton", ScreenGuiNormal)
+    BotonNormal.Name = "NormalJumpButton"
+    BotonNormal.Size = UDim2.new(0, BotonSizeNormalActual, 0, BotonSizeNormalActual)
+    BotonNormal.Position = UDim2.new(pos.ScaleX, pos.OffsetX, pos.ScaleY, pos.OffsetY)
+    
+    AplicarEstiloLiquidGlass(BotonNormal, Color3.fromRGB(255, 255, 255))
+    
+    if os.clock() < CooldownFinNormal then
+        IniciarLoopCooldown(BotonNormal, CooldownFinNormal, "BOMB JUMP", Color3.fromRGB(255, 255, 255), ID_Generacion_Actual)
+    else
+        BotonNormal.Text = "BOMB JUMP"
+    end
+    
+    ConfigurarArrastreYClick(BotonNormal, ARCHIVO_POS_NORMAL, function() return LockNormal end, EjecutarNormalBombJump, "Normal")
+end
+
+local function CrearBotonGold()
+    if CoreGui:FindFirstChild("KillerHub_GoldJump") then CoreGui.KillerHub_GoldJump:Destroy() end
+    ScreenGuiGold = Instance.new("ScreenGui", CoreGui)
+    ScreenGuiGold.Name = "KillerHub_GoldJump"
+    ScreenGuiGold.ResetOnSpawn = false
+    
+    local pos = cargarPosicionBoton(ARCHIVO_POS_GOLD, 0.4, 0.7)
+    BotonGold = Instance.new("TextButton", ScreenGuiGold)
+    BotonGold.Name = "GoldJumpButton"
+    BotonGold.Size = UDim2.new(0, BotonSizeGoldActual, 0, BotonSizeGoldActual)
+    BotonGold.Position = UDim2.new(pos.ScaleX, pos.OffsetX, pos.ScaleY, pos.OffsetY)
+    
+    AplicarEstiloLiquidGlass(BotonGold, Color3.fromRGB(255, 215, 0))
+    
+    if os.clock() < CooldownFinGold then
+        IniciarLoopCooldown(BotonGold, CooldownFinGold, "GOLD JUMP", Color3.fromRGB(255, 215, 0), ID_Generacion_Actual)
+    else
+        BotonGold.Text = "GOLD JUMP"
+    end
+    
+    ConfigurarArrastreYClick(BotonGold, ARCHIVO_POS_GOLD, function() return LockGold end, EjecutarGoldBombJump, "Gold")
+end
+
+local function CrearBotonDiamond()
+    if CoreGui:FindFirstChild("KillerHub_DiamondJump") then CoreGui.KillerHub_DiamondJump:Destroy() end
+    ScreenGuiDiamond = Instance.new("ScreenGui", CoreGui)
+    ScreenGuiDiamond.Name = "KillerHub_DiamondJump"
+    ScreenGuiDiamond.ResetOnSpawn = false
+    
+    local pos = cargarPosicionBoton(ARCHIVO_POS_DIAMOND, 0.5, 0.7)
+    BotonDiamond = Instance.new("TextButton", ScreenGuiDiamond)
+    BotonDiamond.Name = "DiamondJumpButton"
+    BotonDiamond.Size = UDim2.new(0, BotonSizeDiamondActual, 0, BotonSizeDiamondActual)
+    BotonDiamond.Position = UDim2.new(pos.ScaleX, pos.OffsetX, pos.ScaleY, pos.OffsetY)
+    
+    AplicarEstiloLiquidGlass(BotonDiamond, Color3.fromRGB(0, 191, 255))
+    
+    if os.clock() < CooldownFinDiamond then
+        IniciarLoopCooldown(BotonDiamond, CooldownFinDiamond, "DIAMOND JUMP", Color3.fromRGB(0, 191, 255), ID_Generacion_Actual)
+    else
+        BotonDiamond.Text = "DIAMOND JUMP"
+    end
+    
+    ConfigurarArrastreYClick(BotonDiamond, ARCHIVO_POS_DIAMOND, function() return LockDiamond end, EjecutarDiamondBombJump, "Diamond")
+end
+
+local function DestruirBotonNormal() 
+    LimpiarConexionesDrag("Normal")
+    if ScreenGuiNormal then ScreenGuiNormal:Destroy() ScreenGuiNormal = nil BotonNormal = nil end 
+end
+local function DestruirBotonGold() 
+    LimpiarConexionesDrag("Gold")
+    if ScreenGuiGold then ScreenGuiGold:Destroy() ScreenGuiGold = nil BotonGold = nil end 
+end
+local function DestruirBotonDiamond() 
+    LimpiarConexionesDrag("Diamond")
+    if ScreenGuiDiamond then ScreenGuiDiamond:Destroy() ScreenGuiDiamond = nil BotonDiamond = nil end 
+end
+
+--==============================================================================
+-- ⚡ CORE UTILITY FUNCTIONS (PLAYER)
 --==============================================================================
 
--- Speed Glitch Optimizado por Raycast
+-- Speed Glitch Optimizado
 local function startSpeedGlitchLoop()
     if speedGlitchLooping then return end
     speedGlitchLooping = true
@@ -1106,16 +1482,16 @@ local function ToggleInvisibilityFE(state)
         end
         table.clear(invisParts)
 
-        if hum then
-            hum.CameraOffset = Vector3.zero
-        end
+        if hum then hum.CameraOffset = VECTOR3_ZERO end
         return
     end
 
     if not char or not hum then return end
 
     table.clear(invisParts)
-    for _, obj in ipairs(char:GetDescendants()) do
+    local descendants = char:GetDescendants()
+    for i = 1, #descendants do
+        local obj = descendants[i]
         if obj:IsA("BasePart") and obj.Name ~= "HumanoidRootPart" then
             invisParts[obj] = obj.Transparency
             obj.Transparency = 0.5
@@ -1137,17 +1513,13 @@ local function ToggleInvisibilityFE(state)
 
             RunService.RenderStepped:Wait()
 
-            if rootPart and rootPart.Parent then
-                rootPart.CFrame = cf
-            end
-            if humanoid and humanoid.Parent then
-                humanoid.CameraOffset = camOffset
-            end
+            if rootPart and rootPart.Parent then rootPart.CFrame = cf end
+            if humanoid and humanoid.Parent then humanoid.CameraOffset = camOffset end
         end
     end)
 end
 
--- Módulo Anti Fling
+-- Módulo Anti Fling Altamente Optimizado
 local function ToggleAntiFling(state)
     if AntiFlingConnection then
         AntiFlingConnection:Disconnect()
@@ -1159,32 +1531,34 @@ local function ToggleAntiFling(state)
     AntiFlingConnection = RunService.Stepped:Connect(function()
         if not GetFlag("Anti_Fling", false) then return end
 
-        for _, player in ipairs(Players:GetPlayers()) do
+        local allPlayers = Players:GetPlayers()
+        for i = 1, #allPlayers do
+            local player = allPlayers[i]
             if player ~= LocalPlayer and player.Character then
-                for _, part in ipairs(player.Character:GetDescendants()) do
+                local parts = player.Character:GetDescendants()
+                for j = 1, #parts do
+                    local part = parts[j]
                     if part:IsA("BasePart") then
-                        if part.CanCollide then
-                            part.CanCollide = false
-                        end
+                        if part.CanCollide then part.CanCollide = false end
                         if part.AssemblyLinearVelocity.Magnitude > 50 or part.AssemblyAngularVelocity.Magnitude > 50 then
-                            part.AssemblyLinearVelocity = Vector3.zero
-                            part.AssemblyAngularVelocity = Vector3.zero
+                            part.AssemblyLinearVelocity = VECTOR3_ZERO
+                            part.AssemblyAngularVelocity = VECTOR3_ZERO
                         end
                     end
                 end
             end
         end
 
-        for _, obj in ipairs(workspace:GetChildren()) do
+        local wsObjects = workspace:GetChildren()
+        for i = 1, #wsObjects do
+            local obj = wsObjects[i]
             if obj:IsA("Accessory") then
                 local handle = obj:FindFirstChildWhichIsA("BasePart")
                 if handle then
-                    if handle.CanCollide then
-                        handle.CanCollide = false
-                    end
+                    if handle.CanCollide then handle.CanCollide = false end
                     if handle.AssemblyLinearVelocity.Magnitude > 50 then
-                        handle.AssemblyLinearVelocity = Vector3.zero
-                        handle.AssemblyAngularVelocity = Vector3.zero
+                        handle.AssemblyLinearVelocity = VECTOR3_ZERO
+                        handle.AssemblyAngularVelocity = VECTOR3_ZERO
                     end
                 end
             end
@@ -1193,28 +1567,20 @@ local function ToggleAntiFling(state)
 end
 
 --==============================================================================
--- CHARACTER INITIALIZATION & PERSISTENCE
+-- 🔄 CHARACTER INITIALIZATION & PERSISTENCE
 --==============================================================================
-
 local function SetupCharacter(char)
     task.wait(0.3)
     local humanoid = char:WaitForChild("Humanoid", 5)
     if not humanoid then return end
     
-    if GetFlag("Invisible_FE", false) then
-        ToggleInvisibilityFE(true)
-    end
-
-    if GetFlag("Anti_Fling", false) then
-        ToggleAntiFling(true)
-    end
+    if GetFlag("Invisible_FE", false) then ToggleInvisibilityFE(true) end
+    if GetFlag("Anti_Fling", false) then ToggleAntiFling(true) end
     
     humanoid:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
         if GetFlag("WalkSpeed_Toggle", false) then
             local targetSpeed = GetFlag("WalkSpeed_Value", 16)
-            if humanoid.WalkSpeed ~= targetSpeed then
-                humanoid.WalkSpeed = targetSpeed
-            end
+            if humanoid.WalkSpeed ~= targetSpeed then humanoid.WalkSpeed = targetSpeed end
         end
     end)
     
@@ -1222,9 +1588,7 @@ local function SetupCharacter(char)
         if GetFlag("JumpPower_Toggle", false) then
             humanoid.UseJumpPower = true
             local targetJump = GetFlag("JumpPower_Value", 50)
-            if humanoid.JumpPower ~= targetJump then
-                humanoid.JumpPower = targetJump
-            end
+            if humanoid.JumpPower ~= targetJump then humanoid.JumpPower = targetJump end
         end
     end)
     
@@ -1235,11 +1599,25 @@ local function SetupCharacter(char)
     end
 end
 
-LocalPlayer.CharacterAdded:Connect(SetupCharacter)
+LocalPlayer.CharacterAdded:Connect(function(char)
+    -- Reset Detector de Bomb Jump
+    ID_Generacion_Actual = ID_Generacion_Actual + 1
+    CooldownFinNormal = 0
+    CooldownFinGold = 0
+    CooldownFinDiamond = 0
+    
+    if BotonNormal and NormalActivo then BotonNormal.Text = "BOMB JUMP" BotonNormal.TextColor3 = Color3.fromRGB(255, 255, 255) end
+    if BotonGold and GoldActivo then BotonGold.Text = "GOLD JUMP" BotonGold.TextColor3 = Color3.fromRGB(255, 255, 255) end
+    if BotonDiamond and DiamondActivo then BotonDiamond.Text = "DIAMOND JUMP" BotonDiamond.TextColor3 = Color3.fromRGB(255, 255, 255) end
+
+    -- Setup Character de Player
+    SetupCharacter(char)
+end)
+
 if LocalPlayer.Character then task.spawn(SetupCharacter, LocalPlayer.Character) end
 
 --==============================================================================
--- INTERFACE SETUP (TAB: PLAYER)
+-- 📌 1. INTERFACE SETUP (PESTAÑAS DE PLAYER PRIMERO)
 --==============================================================================
 
 local TabPlayer = KillerHub:CreateTab("Player", "Movement")
@@ -1311,7 +1689,9 @@ TabPlayer:CreateToggle("Noclip", "Noclip", function(state)
         NoclipConnection = RunService.Stepped:Connect(function()
             local char = LocalPlayer.Character
             if char and char:IsDescendantOf(workspace) then
-                for _, part in ipairs(char:GetDescendants()) do
+                local parts = char:GetDescendants()
+                for i = 1, #parts do
+                    local part = parts[i]
                     if part:IsA("BasePart") and part.CanCollide then
                         part.CanCollide = false
                     end
@@ -1336,969 +1716,82 @@ TabPlayer:CreateToggle("Anti_Fling", "Anti Fling", function(state)
     ToggleAntiFling(state)
 end)
 
--- Notificación de Carga
-KillerHub:NotifySuccess("KillerHub Script", "Script Loaded successfully.", 4)
+--==============================================================================
+-- 📌 2. INTERFACE SETUP (PESTAÑA DE BOMB JUMP DESPUÉS)
+--==============================================================================
 
--- ============================================================================
--- 🚀 KILLER HUB - PORTABLE TROLL & MODIFY MODULE (MAX OPTIMIZED V3.4)
--- ============================================================================
+local MMVTab = KillerHub:CreateTab("Bomb Jump", "rbxassetid://14321074389")
 
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
-local RunService = game:GetService("RunService")
-local CoreGui = game:GetService("CoreGui")
-local StarterGui = game:GetService("StarterGui")
+-- 1️⃣ NORMAL BOMB JUMP
+MMVTab:CreateSection("Bomb Jump")
 
-local LocalPlayer = Players.LocalPlayer
+MMVTab:CreateToggle("NormalBomb_Enable", "Bomb Jump", function(estado)
+    NormalActivo = estado
+    if estado then CrearBotonNormal() else DestruirBotonNormal() end
+end)
 
--- Control Global de Ejecución
-getgenv().KH_ScriptActive = true
-
-
-if not KillerHub and getgenv().KillerHub then
-    KillerHub = getgenv().KillerHub
-end
-
-if not KillerHub then
-    warn("[KillerHub Error]: UI Library failed to load.")
-    return
-end
-
--- Global Optimizations & Fallen Height Cache
-getgenv().KH_PlayerRoles = getgenv().KH_PlayerRoles or {}
-getgenv().KH_PlayerDeadStatus = getgenv().KH_PlayerDeadStatus or {}
-getgenv().FPDH = Workspace.FallenPartsDestroyHeight
-
--- Cached References & Variables
-local GunAuraActivo = false
-local MostrarBoxVisual = true 
-local GunAuraRadio = 15
-local GunAuraConnection = nil
-local VisualAuraPart = nil
-local CachedGunDrop = nil
-local LastGunScan = 0
-
--- Coin Aura & ESP Variables
-local CoinAuraActivo = false
-local MostrarCoinESPVisual = true
-local CoinAuraRadio = 9
-local CoinAuraConnection = nil
-local CachedCoins = {}
-local ActiveCoinAdornments = {}
-
--- Real-Time VFX Variables
-local ModificarDisparosActivo = false
-local ArcoirisActivo = false
-local ColorDisparoActual = Color3.fromRGB(185, 0, 0)
-local GrosorDisparo = 0.8
-local OpacidadDisparo = 0.0
-local TransparenciaSequence = NumberSequence.new(0)
-local TrackedBeams = {}
-local BeamAddedConnection = nil
-
--- Visual Cleaners
-local function LimpiarAuraVisual()
-    if VisualAuraPart then
-        pcall(function() VisualAuraPart:Destroy() end)
-        VisualAuraPart = nil
-    end
-end
-
-local function LimpiarTodosLosAdornments()
-    for coin, adorn in pairs(ActiveCoinAdornments) do
-        pcall(function() adorn:Destroy() end)
-    end
-    table.clear(ActiveCoinAdornments)
-end
-
--- Helper: Buscar GunDrop optimizado
-local function ObtenerGunDrop()
-    local now = tick()
-    if now - LastGunScan > 0.15 or not CachedGunDrop or not CachedGunDrop.Parent then
-        LastGunScan = now
-        CachedGunDrop = Workspace:FindFirstChild("GunDrop", true)
-    end
-    return CachedGunDrop
-end
-
--- ============================================================================
--- 🛡️ ENVIRONMENT FILTER
--- ============================================================================
-local function EsUnDisparoValido(descendant)
-    if not descendant:IsA("Beam") then return false end
-    
-    local current = descendant
-    while current and current ~= Workspace do
-        local name = current.Name:lower()
-        if name:find("map") or name:find("geom") or name:find("lobby") 
-           or name:find("building") or name:find("sign") or name:find("neon") or name:find("glass") then
-            return false
-        end
-        current = current.Parent
-    end
-    
-    return (descendant.Name == "Beam" or descendant.Name == "CustomBeam")
-end
-
--- ============================================================================
--- ⚡ HIGH-PERFORMANCE VFX MOTOR
--- ============================================================================
-local function InicializarCacheBeams()
-    table.clear(TrackedBeams)
-    for _, desc in ipairs(Workspace:GetDescendants()) do
-        if EsUnDisparoValido(desc) then
-            TrackedBeams[desc] = true
-        end
-    end
-end
-
-local function ModificarVigaIndividual(desc)
-    if not desc or not desc.Parent then return end
-    pcall(function()
-        desc.Texture = "" 
-        desc.TextureSpeed = 0
-        desc.Width0 = GrosorDisparo
-        desc.Width1 = GrosorDisparo
-        desc.Transparency = TransparenciaSequence
-        desc.LightEmission = 0.55
-        desc.LightInfluence = 0.0
-        
-        if not ArcoirisActivo then 
-            desc.Color = ColorSequence.new(ColorDisparoActual)
-        end
-    end)
-end
-
-local function ActualizarTodosLosBeams()
-    if not ModificarDisparosActivo then return end
-    
-    for desc in pairs(TrackedBeams) do
-        if desc and desc.Parent then
-            ModificarVigaIndividual(desc)
-        else
-            TrackedBeams[desc] = nil
-        end
-    end
-end
-
-BeamAddedConnection = Workspace.DescendantAdded:Connect(function(descendant)
-    if EsUnDisparoValido(descendant) then
-        TrackedBeams[descendant] = true
-        if ModificarDisparosActivo then
-            ModificarVigaIndividual(descendant) 
-        end
+MMVTab:CreateSlider("NormalBomb_Size", "Button Size", 60, 200, function(valor)
+    BotonSizeNormalActual = math.floor(valor)
+    if BotonNormal and NormalActivo then
+        BotonNormal.Size = UDim2.new(0, BotonSizeNormalActual, 0, BotonSizeNormalActual)
     end
 end)
 
-InicializarCacheBeams()
+MMVTab:CreateToggle("NormalBomb_Lock", "Lock Position", function(estado)
+    LockNormal = estado
+end)
 
--- ============================================================================
--- 📡 NETWORK SYNC
--- ============================================================================
-local function parsePlayerData(tabla)
-    if type(tabla) == "table" then
-        for name, data in pairs(tabla) do
-            if type(data) == "table" then
-                if data.Role then getgenv().KH_PlayerRoles[name] = data.Role end
-                if data.Dead ~= nil then getgenv().KH_PlayerDeadStatus[name] = data.Dead end
-            end
-        end
-    end
-end
+MMVTab:CreateToggle("NormalBomb_AutoEquip", "Auto Equip", function(estado)
+    AutoEquipNormalActivo = estado
+end)
 
-local PlayerDataChanged = ReplicatedStorage:FindFirstChild("PlayerDataChanged", true)
-local RoundStart = ReplicatedStorage:FindFirstChild("RoundStart", true)
+-- 2️⃣ GOLD BOMB JUMP
+MMVTab:CreateSection("Gold Bomb Jump")
 
-if PlayerDataChanged and PlayerDataChanged:IsA("RemoteEvent") then 
-    PlayerDataChanged.OnClientEvent:Connect(parsePlayerData) 
-end
+MMVTab:CreateToggle("GoldBomb_Enable", "Gold Bomb Jump", function(estado)
+    GoldActivo = estado
+    if estado then CrearBotonGold() else DestruirBotonGold() end
+end)
 
-if RoundStart and RoundStart:IsA("RemoteEvent") then
-    RoundStart.OnClientEvent:Connect(function(arg1, arg2)
-        table.clear(getgenv().KH_PlayerRoles)
-        table.clear(getgenv().KH_PlayerDeadStatus)
-        parsePlayerData(arg2)
-        parsePlayerData(arg1)
-    end)
-end
-
-local function EscanearMochilasYEquipamiento()
-    local sheriffActual = nil
-    for name, role in pairs(getgenv().KH_PlayerRoles) do
-        if role == "Sheriff" and not getgenv().KH_PlayerDeadStatus[name] then
-            sheriffActual = name
-            break
-        end
-    end
-
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer then
-            local character = p.Character
-            local backpack = p:FindFirstChild("Backpack")
-            local tieneKnife = false
-            local tieneGun = false
-            
-            if backpack then
-                if backpack:FindFirstChild("Knife") then tieneKnife = true end
-                if backpack:FindFirstChild("Gun") then tieneGun = true end
-            end
-            
-            if character then
-                if character:FindFirstChild("Knife") then tieneKnife = true end
-                if character:FindFirstChild("Gun") then tieneGun = true end
-            end
-            
-            if tieneKnife then
-                getgenv().KH_PlayerRoles[p.Name] = "Murderer"
-            elseif tieneGun then
-                if sheriffActual and sheriffActual ~= p.Name then
-                    getgenv().KH_PlayerRoles[p.Name] = "Hero"
-                else
-                    getgenv().KH_PlayerRoles[p.Name] = "Sheriff"
-                end
-            end
-        end
-    end
-end
-
-task.spawn(function()
-    while getgenv().KH_ScriptActive and task.wait(0.5) do
-        EscanearMochilasYEquipamiento()
-        for _, p in ipairs(Players:GetPlayers()) do
-            local char = p.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if hum and hum.Health <= 0 then
-                getgenv().KH_PlayerRoles[p.Name] = nil
-                getgenv().KH_PlayerDeadStatus[p.Name] = true
-            end
-        end
+MMVTab:CreateSlider("GoldBomb_Size", "Button Size", 60, 200, function(valor)
+    BotonSizeGoldActual = math.floor(valor)
+    if BotonGold and GoldActivo then
+        BotonGold.Size = UDim2.new(0, BotonSizeGoldActual, 0, BotonSizeGoldActual)
     end
 end)
 
--- ============================================================================
--- 🪙 COIN CACHE & ESP
--- ============================================================================
-task.spawn(function()
-    while getgenv().KH_ScriptActive do
-        if CoinAuraActivo then
-            local coinContainer = Workspace:FindFirstChild("CoinContainer", true)
-            local tempCoins = {}
-            
-            if coinContainer then
-                for _, coin in ipairs(coinContainer:GetChildren()) do
-                    if coin.Name == "Coin_Server" and coin:IsA("BasePart") then
-                        table.insert(tempCoins, coin)
-                        
-                        if MostrarCoinESPVisual then
-                            if not ActiveCoinAdornments[coin] or ActiveCoinAdornments[coin].Parent == nil then
-                                local adorn = Instance.new("BoxHandleAdornment")
-                                adorn.Name = "KH_CoinESP_Box"
-                                adorn.Size = Vector3.new(1.6, 1.6, 1.6)
-                                adorn.Color3 = Color3.fromRGB(255, 215, 0)
-                                adorn.Transparency = 0.45
-                                adorn.AlwaysOnTop = true 
-                                adorn.ZIndex = 6
-                                adorn.Adornee = coin
-                                adorn.Parent = coin 
-                                ActiveCoinAdornments[coin] = adorn
-                            end
-                        end
-                    end
-                end
-            end
-            
-            if not MostrarCoinESPVisual then
-                LimpiarTodosLosAdornments()
-            else
-                for coin, adorn in pairs(ActiveCoinAdornments) do
-                    if not coin or not coin.Parent or not table.find(tempCoins, coin) then
-                        pcall(function() adorn:Destroy() end)
-                        ActiveCoinAdornments[coin] = nil
-                    end
-                end
-            end
-            
-            CachedCoins = tempCoins
-        else
-            LimpiarTodosLosAdornments()
-            table.clear(CachedCoins)
-        end
-        task.wait(0.5)
+MMVTab:CreateToggle("GoldBomb_Lock", "Lock Position", function(estado)
+    LockGold = estado
+end)
+
+MMVTab:CreateToggle("GoldBomb_AutoEquip", "Auto Equip", function(estado)
+    AutoEquipGoldActivo = estado
+end)
+
+-- 3️⃣ DIAMOND BOMB JUMP
+MMVTab:CreateSection("Diamond Bomb Jump")
+
+MMVTab:CreateToggle("DiamondBomb_Enable", "Diamond Bomb Jump", function(estado)
+    DiamondActivo = estado
+    if estado then CrearBotonDiamond() else DestruirBotonDiamond() end
+end)
+
+MMVTab:CreateSlider("DiamondBomb_Size", "Button Size", 60, 200, function(valor)
+    BotonSizeDiamondActual = math.floor(valor)
+    if BotonDiamond and DiamondActivo then
+        BotonDiamond.Size = UDim2.new(0, BotonSizeDiamondActual, 0, BotonSizeDiamondActual)
     end
 end)
 
--- ============================================================================
--- 🌀 CHAOTIC MULTI-DIRECTIONAL FLING ENGINE (INSTAKILL 360)
--- ============================================================================
-local function ObtenerJugadorPorRol(rolBuscado)
-    local espRoles = getgenv().KH_PlayerRoles
-    local espDead = getgenv().KH_PlayerDeadStatus
-    
-    for _, p in ipairs(Players:GetPlayers()) do
-        if espRoles[p.Name] == rolBuscado then
-            local char = p.Character
-            if char and char:FindFirstChild("HumanoidRootPart") then
-                local estaMuerto = espDead[p.Name] == true
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                local sinVida = hum and hum.Health <= 0
-                if not (estaMuerto or sinVida) then 
-                    return p 
-                end
-            end
-        end
-    end
-    return nil
-end
-
-local isFlinging = false
-local function EjecutarSkidFling(TargetPlayer)
-    if not TargetPlayer or TargetPlayer == LocalPlayer or isFlinging then return end
-    isFlinging = true
-    
-    pcall(function()
-        local Character = LocalPlayer.Character
-        local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
-        local RootPart = Humanoid and Humanoid.RootPart
-        
-        local TCharacter = TargetPlayer.Character
-        local THumanoid = TCharacter and TCharacter:FindFirstChildOfClass("Humanoid")
-        local TRootPart = THumanoid and THumanoid.RootPart
-        local THead = TCharacter and TCharacter:FindFirstChild("Head")
-        local Accessory = TCharacter and TCharacter:FindFirstChildOfClass("Accessory")
-        local Handle = Accessory and Accessory:FindFirstChild("Handle")
-        
-        if Character and Humanoid and RootPart and TCharacter and THumanoid then
-            if RootPart.Velocity.Magnitude < 50 then
-                getgenv().OldPos = RootPart.CFrame
-            end
-            
-            if THead then 
-                Workspace.CurrentCamera.CameraSubject = THead 
-            elseif TRootPart then 
-                Workspace.CurrentCamera.CameraSubject = TRootPart 
-            elseif Handle then
-                Workspace.CurrentCamera.CameraSubject = Handle
-            end
-            
-            local FPos = function(BasePart, Pos, Ang)
-                if not (RootPart and BasePart and BasePart.Parent) then return end
-                local targetCF = CFrame.new(BasePart.Position) * Pos * Ang
-                RootPart.CFrame = targetCF
-                Character:SetPrimaryPartCFrame(targetCF)
-                RootPart.Velocity = Vector3.new(9e7, -9e7 * 10, 9e7) 
-                RootPart.RotVelocity = Vector3.new(9e8, 9e8, 9e8)
-            end
-            
-            local SFBasePart = function(BasePart)
-                local TimeToWait = 2.0
-                local Time = tick()
-                local Angle = 0
-                
-                repeat
-                    if RootPart and Character and THumanoid and BasePart and BasePart.Parent then
-                        Angle = Angle + 120
-                        local moveDir = THumanoid.MoveDirection
-                        local spd = math.max(THumanoid.WalkSpeed, BasePart.Velocity.Magnitude) / 1.1
-                        
-                        FPos(BasePart, CFrame.new(0, 1.8, 0) + moveDir * spd, CFrame.Angles(math.rad(Angle), math.rad(Angle), 0))
-                        task.wait()
-                        FPos(BasePart, CFrame.new(0, -1.8, 0) - moveDir * spd, CFrame.Angles(math.rad(Angle), 0, math.rad(Angle)))
-                        task.wait()
-                        FPos(BasePart, CFrame.new(2.5, 1.5, -2.5) + moveDir, CFrame.Angles(0, math.rad(Angle), math.rad(Angle)))
-                        task.wait()
-                        FPos(BasePart, CFrame.new(-2.5, -1.5, 2.5) - moveDir, CFrame.Angles(math.rad(Angle), math.rad(Angle), math.rad(Angle)))
-                        task.wait()
-                        FPos(BasePart, CFrame.new(0, 3.2, 0), CFrame.Angles(math.rad(Angle * 2), 0, 0))
-                        task.wait()
-                        FPos(BasePart, CFrame.new(0, -3.2, 0), CFrame.Angles(0, math.rad(Angle * 2), 0))
-                        task.wait()
-                    else
-                        break
-                    end
-                until BasePart.Velocity.Magnitude > 500 
-                   or BasePart.Parent ~= TargetPlayer.Character 
-                   or TargetPlayer.Parent ~= Players 
-                   or THumanoid.Sit 
-                   or Humanoid.Health <= 0 
-                   or tick() > Time + TimeToWait
-            end
-            
-            pcall(function() Workspace.FallenPartsDestroyHeight = 0/0 end)
-            
-            local BV = Instance.new("BodyVelocity")
-            BV.Name = "EpixVel"
-            BV.Parent = RootPart
-            BV.Velocity = Vector3.new(9e8, -9e8 * 10, 9e8) 
-            BV.MaxForce = Vector3.new(1/0, 1/0, 1/0)
-            
-            Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
-            
-            if TRootPart and THead then
-                if (TRootPart.Position - THead.Position).Magnitude > 5 then 
-                    SFBasePart(THead) 
-                else 
-                    SFBasePart(TRootPart) 
-                end
-            elseif TRootPart then 
-                SFBasePart(TRootPart) 
-            elseif THead then 
-                SFBasePart(THead) 
-            elseif Handle then 
-                SFBasePart(Handle) 
-            end
-            
-            BV:Destroy()
-            Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
-            Workspace.CurrentCamera.CameraSubject = Humanoid
-            
-            if getgenv().OldPos then
-                repeat
-                    RootPart.CFrame = getgenv().OldPos * CFrame.new(0, .5, 0)
-                    Character:SetPrimaryPartCFrame(getgenv().OldPos * CFrame.new(0, .5, 0))
-                    Humanoid:ChangeState("GettingUp")
-                    for _, x in ipairs(Character:GetChildren()) do
-                        if x:IsA("BasePart") then 
-                            x.Velocity = Vector3.new()
-                            x.RotVelocity = Vector3.new() 
-                        end
-                    end
-                    task.wait()
-                until (RootPart.Position - getgenv().OldPos.Position).Magnitude < 25
-            end
-        end
-    end)
-    
-    Workspace.FallenPartsDestroyHeight = getgenv().FPDH
-    isFlinging = false
-end
-
--- ============================================================================
--- 🎯 CUSTOM CROSSHAIR ENGINE (CORREGIDO Y PERSISTENTE)
--- ============================================================================
-local OriginalCrosshairImage = nil
-local OriginalCrosshairSize = nil
-local CachedCrosshairGui = nil
-
-local CrosshairSpinActive = false
-local CrosshairSpinSpeed = 100
-local CrosshairRotation = 0
-local SpinConnection = nil
-
-local UltimoCustomID = ""
-local OptionCrosshairSeleccionada = "Default"
-
--- Estado persisente personalizado
-local CustomCrosshairSizeX = nil
-local CustomCrosshairSizeY = nil
-local CurrentCrosshairAsset = nil
-
-local CrosshairOptions = {
-    ["Default"] = "DEFAULT_GAME_CROSSHAIR",
-    ["Crosshair 1"] = "rbxassetid://5998624778",
-    ["Crosshair 2"] = "rbxassetid://4941755392",
-    ["Crosshair 3"] = "rbxassetid://11719595104",
-    ["Crosshair 4"] = "rbxassetid://119672509101087",
-    ["Crosshair 5"] = "rbxassetid://11759192985",
-    ["Crosshair 6"] = "rbxassetid://5124214183",
-    ["Crosshair 7"] = "rbxassetid://13380318482",
-    ["Crosshair 8"] = "rbxassetid://8138092208",
-    ["Crosshair 9"] = "rbxassetid://17123709960",
-    ["Crosshair 10"] = "rbxassetid://12554863225",
-    ["Crosshair 11"] = "rbxassetid://78920076068446",
-    ["Crosshair 12"] = "rbxassetid://13070257771",
-    ["Crosshair 13"] = "rbxassetid://4618023421",
-    ["Crosshair 14"] = "rbxassetid://2149935582",
-    ["Crosshair 15"] = "rbxassetid://5456882455",
-    ["Crosshair 16"] = "rbxassetid://86534793846898",
-    ["Crosshair 17"] = "rbxassetid://71895353135208",
-    ["Crosshair 18"] = "rbxassetid://10644137227",
-    ["Crosshair 19"] = "rbxassetid://11767037107",
-    ["Crosshair 20"] = "rbxassetid://5995357646",
-    ["Crosshair 21"] = "rbxassetid://8680062686",
-    ["Crosshair 22"] = "rbxassetid://11826465934",
-    ["Crosshair 23"] = "rbxassetid://9871562353"
-}
-
-local function GuardarEstadoOriginalCrosshair(crossGui)
-    if crossGui then
-        if not OriginalCrosshairImage then
-            OriginalCrosshairImage = crossGui.Image
-        end
-        if not OriginalCrosshairSize then
-            OriginalCrosshairSize = crossGui.Size
-        end
-    end
-end
-
-local function ActualizarCrosshairGui()
-    if not CachedCrosshairGui or not CachedCrosshairGui.Parent then return end
-
-    -- Re-aplicar imagen si hay una elegida
-    if CurrentCrosshairAsset then
-        if CurrentCrosshairAsset == "DEFAULT_GAME_CROSSHAIR" then
-            if OriginalCrosshairImage then CachedCrosshairGui.Image = OriginalCrosshairImage end
-        else
-            CachedCrosshairGui.Image = CurrentCrosshairAsset
-        end
-    end
-
-    -- Re-aplicar tamaño si hay uno configurado
-    if CustomCrosshairSizeX or CustomCrosshairSizeY then
-        local currentX = CustomCrosshairSizeX or (OriginalCrosshairSize and OriginalCrosshairSize.X.Offset) or CachedCrosshairGui.Size.X.Offset
-        local currentY = CustomCrosshairSizeY or (OriginalCrosshairSize and OriginalCrosshairSize.Y.Offset) or CachedCrosshairGui.Size.Y.Offset
-        CachedCrosshairGui.Size = UDim2.new(CachedCrosshairGui.Size.X.Scale, currentX, CachedCrosshairGui.Size.Y.Scale, currentY)
-    end
-end
-
-local function ObtenerCrosshairGui()
-    if CachedCrosshairGui and CachedCrosshairGui.Parent then
-        return CachedCrosshairGui
-    end
-    
-    -- Si el GUI fue destruido (respawn), reseteamos los estados originales cacheados
-    OriginalCrosshairImage = nil
-    OriginalCrosshairSize = nil
-    CachedCrosshairGui = nil
-
-    local pGui = LocalPlayer:FindFirstChild("PlayerGui")
-    if pGui then
-        local topbar = pGui:FindFirstChild("GameTopbar")
-        if topbar then
-            local cross = topbar:FindFirstChild("Crosshair")
-            if cross and (cross:IsA("ImageLabel") or cross:IsA("ImageButton")) then
-                CachedCrosshairGui = cross
-                GuardarEstadoOriginalCrosshair(cross)
-                -- Re-aplicar personalizaciones en automático al detectar nuevo Gui
-                ActualizarCrosshairGui()
-                return cross
-            end
-        end
-    end
-    return nil
-end
-
-local function AplicarCrosshairImage(assetUri)
-    CurrentCrosshairAsset = assetUri
-    local crossGui = ObtenerCrosshairGui()
-    if crossGui then
-        ActualizarCrosshairGui()
-    else
-        KillerHub:NotifyWarn("Crosshair", "Game Crosshair GUI not found.", 3)
-    end
-end
-
--- Monitor constante para mantener sincronizado el Crosshair tras reaparecer
-RunService.RenderStepped:Connect(function(dt)
-    if not getgenv().KH_ScriptActive then return end
-    
-    local crossGui = ObtenerCrosshairGui()
-    if crossGui and CrosshairSpinActive then
-        CrosshairRotation = (CrosshairRotation + (CrosshairSpinSpeed * 10 * dt)) % 360
-        crossGui.Rotation = CrosshairRotation
-    end
+MMVTab:CreateToggle("DiamondBomb_Lock", "Lock Position", function(estado)
+    LockDiamond = estado
 end)
 
--- ============================================================================
--- 🛠️ UI BUILD
--- ============================================================================
-local TrollTab = KillerHub:CreateTab("Troll", "rbxassetid://94245473778571")
-local ModifyTab = KillerHub:CreateTab("Modify", "rbxassetid://140013014943385")
-
-local SoundConnection, GrabGunConnection, GunAuraConnection, CoinAuraConnection
-
-TrollTab:CreateSection("Combat Attacks")
-
-TrollTab:CreateButton("Fling Murderer", function()
-    local target = ObtenerJugadorPorRol("Murderer")
-    if target then task.spawn(function() EjecutarSkidFling(target) end)
-    else StarterGui:SetCore("ChatMakeSystemMessage", {Text = "[KillerHub]: Murderer not found in cache yet.", Color = Color3.fromRGB(255, 100, 100)}) end
+MMVTab:CreateToggle("DiamondBomb_AutoEquip", "Auto Equip", function(estado)
+    AutoEquipDiamondActivo = estado
 end)
 
-TrollTab:CreateButton("Fling Sheriff / Hero", function()
-    local target = ObtenerJugadorPorRol("Sheriff") or ObtenerJugadorPorRol("Hero")
-    if target then task.spawn(function() EjecutarSkidFling(target) end)
-    else StarterGui:SetCore("ChatMakeSystemMessage", {Text = "[KillerHub]: Sheriff or Hero not found in cache yet.", Color = Color3.fromRGB(255, 100, 100)}) end
-end)
-
-TrollTab:CreateSection("Gun Aura")
-
-TrollTab:CreateToggle("GunAuraToggle", "Gun Aura", function(estado)
-    GunAuraActivo = estado
-    if estado then
-        GunAuraConnection = RunService.Heartbeat:Connect(function()
-            local myCharacter = LocalPlayer.Character
-            local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
-            if myRoot and myCharacter:FindFirstChildOfClass("Humanoid") and myCharacter:FindFirstChildOfClass("Humanoid").Health > 0 then
-                
-                local gunDrop = ObtenerGunDrop()
-                
-                if gunDrop then
-                    local distancia = (myRoot.Position - gunDrop.Position).Magnitude
-                    
-                    if MostrarBoxVisual then
-                        if not VisualAuraPart or VisualAuraPart.Parent == nil then
-                            VisualAuraPart = Instance.new("Part")
-                            VisualAuraPart.Name = "GunAuraHitbox3D"
-                            VisualAuraPart.Shape = Enum.PartType.Block
-                            VisualAuraPart.Material = Enum.Material.Neon
-                            VisualAuraPart.Color = Color3.fromRGB(0, 255, 100)
-                            VisualAuraPart.Transparency = 0.85
-                            VisualAuraPart.Anchored = true
-                            VisualAuraPart.CanCollide = false
-                            VisualAuraPart.CastShadow = false
-                            VisualAuraPart.Parent = Workspace
-                        end
-                        
-                        local tamanoCaja = GunAuraRadio * 2
-                        VisualAuraPart.Size = Vector3.new(tamanoCaja, tamanoCaja, tamanoCaja)
-                        VisualAuraPart.CFrame = CFrame.new(gunDrop.Position)
-                    else
-                        LimpiarAuraVisual()
-                    end
-                    
-                    if distancia <= GunAuraRadio then
-                        pcall(function()
-                            firetouchinterest(myRoot, gunDrop, 0)
-                            firetouchinterest(myRoot, gunDrop, 1)
-                        end)
-                    end
-                else
-                    LimpiarAuraVisual()
-                end
-            end
-        end)
-    else
-        if GunAuraConnection then GunAuraConnection:Disconnect() GunAuraConnection = nil end
-        LimpiarAuraVisual()
-    end
-end)
-
-TrollTab:CreateToggle("ShowGunBoxToggle", "Show Gun Box", function(estado)
-    MostrarBoxVisual = estado
-    if not estado then LimpiarAuraVisual() end
-end)
-
-TrollTab:CreateSlider("GunAuraRadius", "Gun Aura Radius", 1, 50, function(valor)
-    GunAuraRadio = valor
-end)
-
-TrollTab:CreateSection("Coin Aura")
-
-TrollTab:CreateToggle("CoinAuraToggle", "Coin Aura", function(estado)
-    CoinAuraActivo = estado
-    if estado then
-        CoinAuraConnection = RunService.Heartbeat:Connect(function()
-            local myCharacter = LocalPlayer.Character
-            local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
-            if myRoot and myCharacter:FindFirstChildOfClass("Humanoid") and myCharacter:FindFirstChildOfClass("Humanoid").Health > 0 then
-                
-                for _, coin in ipairs(CachedCoins) do
-                    if coin and coin.Parent then
-                        local dist = (myRoot.Position - coin.Position).Magnitude
-                        
-                        if dist <= CoinAuraRadio then
-                            pcall(function()
-                                firetouchinterest(myRoot, coin, 0)
-                                firetouchinterest(myRoot, coin, 1)
-                            end)
-                        end
-                    end
-                end
-            end
-        end)
-    else
-        if CoinAuraConnection then CoinAuraConnection:Disconnect() CoinAuraConnection = nil end
-        LimpiarTodosLosAdornments()
-    end
-end)
-
-TrollTab:CreateToggle("ShowCoinBoxToggle", "See Coins", function(estado)
-    MostrarCoinESPVisual = estado
-    if not estado then LimpiarTodosLosAdornments() end
-end)
-
-TrollTab:CreateSlider("CoinAuraRadius", "Coin Aura Radius", 1, 9, function(valor)
-    CoinAuraRadio = valor
-end)
-
-TrollTab:CreateSection("Grab Gun")
-
-TrollTab:CreateToggle("AutoGrabGun", "Grab Gun", function(estado)
-    if estado then
-        GrabGunConnection = RunService.Heartbeat:Connect(function()
-            local myCharacter = LocalPlayer.Character
-            local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
-            if myRoot and myCharacter:FindFirstChildOfClass("Humanoid") and myCharacter:FindFirstChildOfClass("Humanoid").Health > 0 then
-                local gunDrop = ObtenerGunDrop()
-                if gunDrop then
-                    local distancia = (myRoot.Position - gunDrop.Position).Magnitude
-                    if distancia < 500 then
-                        pcall(function()
-                            firetouchinterest(myRoot, gunDrop, 0)
-                            firetouchinterest(myRoot, gunDrop, 1)
-                        end)
-                    end
-                end
-            end
-        end)
-    else
-        if GrabGunConnection then GrabGunConnection:Disconnect() GrabGunConnection = nil end
-    end
-end)
-
--- ============================================================================
--- PESTAÑA MODIFY
--- ============================================================================
-ModifyTab:CreateSection("Custom Crosshair")
-
-local DropdownOptionsCrosshair = {
-    "Default", "Custom ID", "Crosshair 1", "Crosshair 2", "Crosshair 3", "Crosshair 4", "Crosshair 5",
-    "Crosshair 6", "Crosshair 7", "Crosshair 8", "Crosshair 9", "Crosshair 10",
-    "Crosshair 11", "Crosshair 12", "Crosshair 13", "Crosshair 14", "Crosshair 15",
-    "Crosshair 16", "Crosshair 17", "Crosshair 18", "Crosshair 19", "Crosshair 20",
-    "Crosshair 21", "Crosshair 22", "Crosshair 23"
-}
-
-ModifyTab:CreateDropdown("SelectCrosshair", "Select Crosshair", DropdownOptionsCrosshair, function(seleccion)
-    OptionCrosshairSeleccionada = seleccion
-    if seleccion == "Custom ID" then
-        if #UltimoCustomID > 0 then
-            AplicarCrosshairImage("rbxassetid://" .. UltimoCustomID)
-        else
-            KillerHub:NotifyWarn("Crosshair", "Ingresa un ID numérico abajo", 3)
-        end
-    else
-        local asset = CrosshairOptions[seleccion]
-        if asset then
-            AplicarCrosshairImage(asset)
-        end
-    end
-end)
-
-ModifyTab:CreateInput("CustomCrosshairID", "Custom Asset ID", "Enter ID...", function(texto)
-    local idLimpia = texto:gsub("%D", "")
-    if #idLimpia > 0 then
-        UltimoCustomID = idLimpia
-        if OptionCrosshairSeleccionada == "Custom ID" then
-            AplicarCrosshairImage("rbxassetid://" .. UltimoCustomID)
-            KillerHub:NotifySuccess("Crosshair", "Custom Crosshair Applied", 3)
-        else
-            KillerHub:NotifySuccess("Crosshair", "ID Guardado. Selecciona 'Custom ID' arriba", 3)
-        end
-    else
-        KillerHub:NotifyWarn("Crosshair", "Enter a valid numeric ID", 3)
-    end
-end)
-
-ModifyTab:CreateSlider("CrosshairSizeX", "Size X", 5, 200, function(val)
-    CustomCrosshairSizeX = val
-    ActualizarCrosshairGui()
-end)
-
-ModifyTab:CreateSlider("CrosshairSizeY", "Size Y", 5, 200, function(val)
-    CustomCrosshairSizeY = val
-    ActualizarCrosshairGui()
-end)
-
-ModifyTab:CreateToggleSlider(
-    "SpinCrosshair_Enabled", "SpinCrosshair_Speed", "Spin Crosshair Speed", 10, 250,
-    function(estado)
-        CrosshairSpinActive = estado
-        if not estado then
-            local crossGui = ObtenerCrosshairGui()
-            if crossGui then crossGui.Rotation = 0 end
-        end
-    end,
-    function(valor)
-        CrosshairSpinSpeed = valor
-    end
-)
-
-ModifyTab:CreateSection("Weapon Sounds")
-
-local GunSounds = {
-    ["Default"] = {Disparo = nil, Recarga = nil},
-    ["Gingerscope"] = {Disparo = "rbxassetid://98245448501031", Recarga = nil},
-    ["Laser"] = {Disparo = "rbxassetid://8561500387", Recarga = "rbxassetid://8561502124"}
-}
-
-local KnifeSounds = {
-    ["Default"] = nil,
-    ["Minecraft"] = "rbxassetid://133823475766637",
-    ["Minecraft 2"] = "rbxassetid://133248563542879",
-    ["Minecraft 3"] = "rbxassetid://107868586874799",
-    ["Minecraft 4"] = "rbxassetid://90520156786055",
-    ["Fart"] = "rbxassetid://17043360893"
-}
-
-local SonidoPistolaActual = "Default"
-local SonidoCuchilloActual = "Default"
-local VolumenPistola = 2 
-local VolumenCuchillo = 2
-local OriginalIds = {}
-
-local function ModificarAudio(descendant)
-    if not descendant:IsA("Sound") then return end
-    
-    if not OriginalIds[descendant] then
-        OriginalIds[descendant] = descendant.SoundId
-    end
-
-    local name = descendant.Name:lower()
-    local esDePistola = descendant:FindFirstAncestor("Gun") or descendant:FindFirstAncestor("Pistola") or name:find("gun") or name:find("shoot") or name:find("reload")
-    local esDeCuchillo = descendant:FindFirstAncestor("Knife") or descendant:FindFirstAncestor("Cuchillo") or name:find("slash") or name:find("stab") or name:find("knife")
-
-    local configPistola = GunSounds[SonidoPistolaActual]
-    if SonidoPistolaActual ~= "Default" and configPistola and esDePistola and not esDeCuchillo then
-        descendant.Volume = VolumenPistola
-        if (name:find("shoot") or name:find("shot") or name:find("fire")) and configPistola.Disparo then
-            descendant.SoundId = configPistola.Disparo
-        elseif name:find("reload") and configPistola.Recarga then
-            descendant.SoundId = configPistola.Recarga
-        end
-    elseif SonidoPistolaActual == "Default" and esDePistola then
-        if OriginalIds[descendant] then descendant.SoundId = OriginalIds[descendant] end
-    end
-    
-    local audioCuchillo = KnifeSounds[SonidoCuchilloActual]
-    if SonidoCuchilloActual ~= "Default" and audioCuchillo and esDeCuchillo then
-        descendant.Volume = VolumenCuchillo
-        if (name:find("slash") or name:find("stab") or name:find("kill") or name:find("hit")) then
-            descendant.SoundId = audioCuchillo
-        end
-    elseif SonidoCuchilloActual == "Default" and esDeCuchillo then
-        if OriginalIds[descendant] then descendant.SoundId = OriginalIds[descendant] end
-    end
-end
-
-local function GestionarEscuchadorSonidos()
-    if SoundConnection then SoundConnection:Disconnect() SoundConnection = nil end
-    
-    local contenedores = {Workspace, ReplicatedStorage}
-    for _, cont in ipairs(contenedores) do
-        for _, descendant in ipairs(cont:GetDescendants()) do
-            if descendant:IsA("Sound") then ModificarAudio(descendant) end
-        end
-    end
-
-    SoundConnection = Workspace.DescendantAdded:Connect(function(descendant)
-        if descendant:IsA("Sound") then
-            ModificarAudio(descendant)
-        end
-    end)
-end
-
-ModifyTab:CreateDropdown("CustomGunSound", "Select Gun Sound", {"Default", "Gingerscope", "Laser"}, function(seleccionado)
-    SonidoPistolaActual = seleccionado
-    GestionarEscuchadorSonidos()
-end)
-
-local actualizandoVolPistola = 0
-ModifyTab:CreateSlider("GunVolume", "Gun Volume", 0, 10, function(valor)
-    VolumenPistola = valor
-    local idActual = tick()
-    actualizandoVolPistola = idActual
-    task.wait(0.08)
-    if actualizandoVolPistola == idActual then
-        GestionarEscuchadorSonidos()
-    end
-end)
-
-ModifyTab:CreateDropdown("CustomKnifeSound", "Select Knife Sound", {"Default", "Minecraft", "Minecraft 2", "Minecraft 3", "Minecraft 4", "Fart"}, function(seleccionado)
-    SonidoCuchilloActual = seleccionado
-    GestionarEscuchadorSonidos()
-end)
-
-local actualizandoVolCuchillo = 0
-ModifyTab:CreateSlider("KnifeVolume", "Knife Volume", 0, 10, function(valor)
-    VolumenCuchillo = valor
-    local idActual = tick()
-    actualizandoVolCuchillo = idActual
-    task.wait(0.08)
-    if actualizandoVolCuchillo == idActual then
-        GestionarEscuchadorSonidos()
-    end
-end)
-
--- ============================================================================
--- 💎 CUSTOM BEAM VFX
--- ============================================================================
-ModifyTab:CreateSection("Gun Shot Effects")
-
-ModifyTab:CreateToggle("ModifyVfxActive", "Modify Gun Shots Trail", function(val) 
-    ModificarDisparosActivo = val 
-    if val then
-        ActualizarTodosLosBeams()
-    end
-end)
-
-ModifyTab:CreateToggle("RainbowVfxActive", "Rainbow Effect (RGB)", function(val) 
-    ArcoirisActivo = val 
-    ActualizarTodosLosBeams()
-end)
-
-RunService.Heartbeat:Connect(function()
-    if not ModificarDisparosActivo or not ArcoirisActivo then return end
-    
-    local t = tick() * 1.2
-    local premiumSequence = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromHSV((t) % 1, 1.0, 0.85)),
-        ColorSequenceKeypoint.new(0.25, Color3.fromHSV((t + 0.25) % 1, 1.0, 0.85)),
-        ColorSequenceKeypoint.new(0.50, Color3.fromHSV((t + 0.50) % 1, 1.0, 0.85)),
-        ColorSequenceKeypoint.new(0.75, Color3.fromHSV((t + 0.75) % 1, 1.0, 0.85)),
-        ColorSequenceKeypoint.new(1, Color3.fromHSV((t + 1.00) % 1, 1.0, 0.85))
-    })
-    
-    for b in pairs(TrackedBeams) do 
-        if b and b.Parent then 
-            b.Color = premiumSequence 
-            b.Transparency = TransparenciaSequence
-        else 
-            TrackedBeams[b] = nil 
-        end 
-    end
-end)
-
-ModifyTab:CreateColorPicker("BeamCustomColor", "Shot Color", Color3.fromRGB(185, 0, 0), function(c) 
-    ColorDisparoActual = c 
-    ActualizarTodosLosBeams()
-end)
-
-ModifyTab:CreateSlider("BeamTransparency", "Shot Trail Opacity", 1, 10, function(v) 
-    OpacidadDisparo = (v - 1) / 9
-    TransparenciaSequence = NumberSequence.new(OpacidadDisparo)
-    ActualizarTodosLosBeams()
-end)
-
-ModifyTab:CreateSlider("BeamWidth", "Shot Width", 1, 15, function(v) 
-    GrosorDisparo = v / 10
-    ActualizarTodosLosBeams()
-end)
-
--- Clean Up cuando el Hub se cierra/descarga
-CoreGui.ChildRemoved:Connect(function(child)
-    if child.Name == "KillerHub" then 
-        getgenv().KH_ScriptActive = false
-        
-        if SoundConnection then SoundConnection:Disconnect() end
-        if GrabGunConnection then GrabGunConnection:Disconnect() end
-        if GunAuraConnection then GunAuraConnection:Disconnect() end
-        if CoinAuraConnection then CoinAuraConnection:Disconnect() end
-        if SpinConnection then SpinConnection:Disconnect() end
-        if BeamAddedConnection then BeamAddedConnection:Disconnect() end
-        
-        local crossGui = ObtenerCrosshairGui()
-        if crossGui then
-            if OriginalCrosshairImage then crossGui.Image = OriginalCrosshairImage end
-            if OriginalCrosshairSize then crossGui.Size = OriginalCrosshairSize end
-            crossGui.Rotation = 0
-        end
-
-        LimpiarAuraVisual()
-        LimpiarTodosLosAdornments()
-        table.clear(TrackedBeams)
-    end
-end)
+-- Notificación Final de Carga Exitosa
+KillerHub:NotifySuccess("MM2 Script", "Script unificado y cargado con éxito.", 4)
 
 return KillerHub
