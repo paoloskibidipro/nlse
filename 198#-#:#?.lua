@@ -1,9 +1,771 @@
+-- ============================================================================
+-- 👻 KILLER HUB | MURDER SUITE V9.3 (SMART RESOURCE SAVER & VISUAL FIX)
+-- ============================================================================
+
+if getgenv().__KillerHub_MurderSuite_Loaded then
+    if getgenv().KillerHub and getgenv().KillerHub.NotifyWarn then
+        getgenv().KillerHub:NotifyWarn("Ya cargado", "Murder Suite ya se está ejecutando.", 3)
+    end
+    return
+end
+getgenv().__KillerHub_MurderSuite_Loaded = true
+
+local KillerHub = loadstring(game:HttpGet("https://raw.githubusercontent.com/paoloskibidipro/noname/refs/heads/main/unknow.lua"))()
+
+-- Servicios
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Stats = game:GetService("Stats")
+local Camera = workspace.CurrentCamera
+
+-- Constants & Memory Caches
+local MAX_DISTANCE_SQ = 1822500
+local wallFilterTable = {}
+local partsToCheck = {nil, nil}
+local playerFysics = {}
+local lastVisualPosition = Vector3.new(0, 0, 0)
+local lastActualPosition = Vector3.new(0, 0, 0)
+local lastTracerPosition = Vector3.new(0, 0, 0)
+local cachedHasKnife = false
+local lastKnifeCheck = 0
+local cachedTarget = nil
+local wasHitboxActive = false
+
+local raycastParams = RaycastParams.new()
+raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+-- Caché de Viewport y DPI
+local cachedViewportSize = Camera.ViewportSize
+local cachedScreenCenter = Vector2.new(cachedViewportSize.X / 2, cachedViewportSize.Y / 2)
+local cachedDpiScale = 1
+
+local function updateViewportCache()
+    cachedViewportSize = Camera.ViewportSize
+    cachedScreenCenter = Vector2.new(cachedViewportSize.X / 2, cachedViewportSize.Y / 2)
+    local viewportY = cachedViewportSize.Y
+    cachedDpiScale = viewportY > 0 and math.max(1, 1080 / viewportY) or 1
+end
+updateViewportCache()
+KillerHub:AddTask(Camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateViewportCache))
+
+-- Visual Drawing API
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Thickness = 0.8; FOVCircle.NumSides = 36; FOVCircle.Filled = false; FOVCircle.Visible = false; FOVCircle.Transparency = 0.8
+KillerHub:AddTask(FOVCircle)
+
+local PredRingOuter = Drawing.new("Circle")
+PredRingOuter.Radius = 6.0; PredRingOuter.Thickness = 1.2; PredRingOuter.Filled = false; PredRingOuter.Color = Color3.fromRGB(255, 35, 35); PredRingOuter.Visible = false
+KillerHub:AddTask(PredRingOuter)
+
+local PredDotCenter = Drawing.new("Circle")
+PredDotCenter.Radius = 2.5; PredDotCenter.Thickness = 1; PredDotCenter.Filled = true; PredDotCenter.Color = Color3.fromRGB(255, 255, 255); PredDotCenter.Visible = false
+KillerHub:AddTask(PredDotCenter)
+
+local PredLine = Drawing.new("Line")
+PredLine.Thickness = 1.0; PredLine.Color = Color3.fromRGB(185, 0, 255); PredLine.Transparency = 0.65; PredLine.Visible = false
+KillerHub:AddTask(PredLine)
+
+-- Morado Void Tracer
+local TracerLine = Drawing.new("Line")
+TracerLine.Thickness = 1.0; TracerLine.Color = Color3.fromRGB(140, 0, 255); TracerLine.Transparency = 0.9; TracerLine.Visible = false
+KillerHub:AddTask(TracerLine)
+
+-- Helper para leer Flags
+local function GetFlag(flagName, default)
+    local f = KillerHub.Flags[flagName]
+    if f == nil or f.CurrentValue == nil then return default end
+    return f.CurrentValue
+end
+
+-- Caché de Materiales sin pcall dentro de loops
+local materialCache = {}
+local function getMaterialEnum(matString)
+    if materialCache[matString] then return materialCache[matString] end
+    local success, mat = pcall(function() return Enum.Material[matString] end)
+    local result = success and mat or Enum.Material.Plastic
+    materialCache[matString] = result
+    return result
+end
+
+-- Auxiliares del juego con Throttle de caché
+local function hasKnifeInInventory()
+    local now = os.clock()
+    if now - lastKnifeCheck > 0.25 then
+        lastKnifeCheck = now
+        local char = LocalPlayer.Character
+        local backpack = LocalPlayer:FindFirstChild("Backpack")
+        cachedHasKnife = (char and char:FindFirstChild("Knife")) or (backpack and backpack:FindFirstChild("Knife"))
+    end
+    return cachedHasKnife
+end
+
+local function checkPlayerHasGun(player)
+    local char = player.Character
+    if char and char:FindFirstChild("Gun") then return true end
+    local backpack = player:FindFirstChild("Backpack")
+    return backpack and backpack:FindFirstChild("Gun") ~= nil
+end
+
+-- Wall Check optimizado
+local function isVisibleThroughWalls(targetChar)
+    if not targetChar then return false end
+    local localChar = LocalPlayer.Character
+    if not localChar then return false end
+
+    local head = targetChar:FindFirstChild("Head")
+    local torso = targetChar:FindFirstChild("UpperTorso") or targetChar:FindFirstChild("Torso")
+    if not head and not torso then return false end
+
+    local origin = Camera.CFrame.Position
+    partsToCheck[1] = head
+    partsToCheck[2] = torso
+
+    for i = 1, 2 do
+        local part = partsToCheck[i]
+        if part then
+            local direction = part.Position - origin
+            if direction:Dot(direction) > 0 then
+                table.clear(wallFilterTable)
+                wallFilterTable[1] = localChar
+                wallFilterTable[2] = targetChar
+                wallFilterTable[3] = Camera
+                
+                local visible = true
+                for step = 1, 3 do
+                    raycastParams.FilterDescendantsInstances = wallFilterTable
+                    local raycastResult = workspace:Raycast(origin, direction, raycastParams)
+
+                    if not raycastResult then
+                        visible = true
+                        break
+                    end
+
+                    local hitInst = raycastResult.Instance
+                    if hitInst then
+                        if not hitInst.CanCollide or hitInst.Transparency >= 0.75 then
+                            table.insert(wallFilterTable, hitInst)
+                        else
+                            visible = false
+                            break
+                        end
+                    else
+                        visible = true
+                        break
+                    end
+                end
+
+                if visible then return true end
+            end
+        end
+    end
+
+    return false
+end
+
+-- Detección de Sheriff optimizada
+local CurrentSheriff = nil
+local lastSheriffScan = 0
+
+local function updateSheriffTarget()
+    if CurrentSheriff and CurrentSheriff.Parent == Players then
+        local char = CurrentSheriff.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health > 0 and checkPlayerHasGun(CurrentSheriff) then
+            return 
+        end
+    end
+
+    local now = os.clock()
+    if now - lastSheriffScan > 0.6 then
+        lastSheriffScan = now
+        CurrentSheriff = nil
+        
+        local allPlayers = Players:GetPlayers()
+        for i = 1, #allPlayers do
+            local player = allPlayers[i]
+            if player ~= LocalPlayer and checkPlayerHasGun(player) then
+                local char = player.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    CurrentSheriff = player
+                    break
+                end
+            end
+        end
+    end
+end
+
+-- Selección de Objetivo Dual
+local function getClosestTargetToFOV()
+    local localHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not localHrp then return nil end
+
+    local aimType = GetFlag("KnifeAimType", "Target FOV")
+    local wallCheck = GetFlag("KnifeWallCheckActive", false)
+    local allPlayers = Players:GetPlayers()
+
+    if aimType == "Nearest Player" then
+        local nearestPlayer = nil
+        local shortestDistSq = MAX_DISTANCE_SQ
+
+        for i = 1, #allPlayers do
+            local player = allPlayers[i]
+            if player ~= LocalPlayer and player.Character then
+                local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+                local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+
+                if hrp and humanoid and humanoid.Health > 0 then
+                    local diff = hrp.Position - localHrp.Position
+                    local distSq = diff:Dot(diff)
+                    if distSq <= shortestDistSq then
+                        if wallCheck and not isVisibleThroughWalls(player.Character) then
+                            continue
+                        end
+                        shortestDistSq = distSq
+                        nearestPlayer = player
+                    end
+                end
+            end
+        end
+
+        cachedTarget = nearestPlayer
+        return nearestPlayer
+    end
+
+    if GetFlag("PrioritizeSheriffActive", false) then
+        updateSheriffTarget()
+    else
+        CurrentSheriff = nil
+    end
+
+    local fovRadius = GetFlag("FovRadiusMurder", 150)
+
+    if CurrentSheriff and CurrentSheriff.Character then
+        local hrp = CurrentSheriff.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local diff = hrp.Position - localHrp.Position
+            if diff:Dot(diff) <= MAX_DISTANCE_SQ then
+                local screenPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
+                if onScreen then
+                    local distToCenter = (Vector2.new(screenPos.X, screenPos.Y) - cachedScreenCenter).Magnitude
+                    if distToCenter < fovRadius then
+                        if not wallCheck or isVisibleThroughWalls(CurrentSheriff.Character) then
+                            cachedTarget = CurrentSheriff
+                            return CurrentSheriff
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local closestInnocent = nil
+    local shortestDistance = fovRadius 
+
+    for i = 1, #allPlayers do
+        local player = allPlayers[i]
+        if player ~= LocalPlayer and player ~= CurrentSheriff and player.Character then
+            local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+            local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+            
+            if hrp and humanoid and humanoid.Health > 0 then
+                local diff = hrp.Position - localHrp.Position
+                if diff:Dot(diff) > MAX_DISTANCE_SQ then continue end
+
+                local screenPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
+                if onScreen then
+                    local distToCenter = (Vector2.new(screenPos.X, screenPos.Y) - cachedScreenCenter).Magnitude
+                    if distToCenter < shortestDistance then
+                        if wallCheck and not isVisibleThroughWalls(player.Character) then
+                            continue
+                        end
+                        shortestDistance = distToCenter
+                        closestInnocent = player
+                    end
+                end
+            end
+        end
+    end
+
+    cachedTarget = closestInnocent
+    return closestInnocent
+end
+
+-- Motor de Predicción Balística de Cuchillo
+local function getAdvancedKnifePrediction(targetChar)
+    if not targetChar then return nil, nil end
+    local hrp = targetChar:FindFirstChild("HumanoidRootPart")
+    local humanoid = targetChar:FindFirstChildOfClass("Humanoid")
+    local localHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    
+    if not hrp or not humanoid or not localHrp then return nil, nil end
+
+    local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
+    local targetPosition = hrp.Position
+    local distance = (targetPosition - localHrp.Position).Magnitude
+    local physicsData = playerFysics[targetPlayer]
+    
+    if physicsData and physicsData.IsLaggingOut then
+        return targetPosition, targetPosition
+    end
+
+    local extentsY = targetChar:GetExtentsSize().Y
+    local scaleFactor = 1.0
+    if humanoid:FindFirstChild("BodyHeightScale") then scaleFactor = humanoid.BodyHeightScale.Value end
+
+    if extentsY < 4.8 or scaleFactor < 0.85 then
+        local heightDeficit = math.clamp((5.1 - extentsY) * 0.52, 0.4, 2.3)
+        targetPosition = targetPosition - Vector3.new(0, heightDeficit, 0)
+    end
+
+    local smoothVelocity = physicsData and physicsData.SmoothedVelocity or Vector3.new(0, 0, 0)
+    if smoothVelocity:Dot(smoothVelocity) < 0.0225 then return targetPosition, targetPosition end
+
+    local rawPing = 0.06
+    if Stats and Stats:FindFirstChild("Network") and Stats.Network:FindFirstChild("ServerToClientPing") then
+        rawPing = Stats.Network.ServerToClientPing:GetValue() / 1000
+    end
+    local ping = math.clamp(rawPing, 0.01, 0.25)
+    local travelTime = (distance / 85) + ping
+
+    local horizontalVelocity = Vector3.new(smoothVelocity.X, 0, smoothVelocity.Z)
+    local exactSpeed = horizontalVelocity.Magnitude
+
+    local MAX_WALKSPEED = 16.715
+    if exactSpeed > MAX_WALKSPEED then 
+        horizontalVelocity = horizontalVelocity.Unit * MAX_WALKSPEED
+        exactSpeed = MAX_WALKSPEED
+    end
+
+    local jukeFactor = 1.0
+    if physicsData and physicsData.LastVelocity then
+        local lastHorizVel = Vector3.new(physicsData.LastVelocity.X, 0, physicsData.LastVelocity.Z)
+        local lastSpeed = lastHorizVel.Magnitude
+        
+        if exactSpeed > 1 and lastSpeed > 1 then
+            local currentDir = horizontalVelocity.Unit
+            local lastDir = lastHorizVel.Unit
+            local dotProduct = currentDir:Dot(lastDir)
+            
+            if dotProduct < 0.94 then
+                jukeFactor = math.clamp(dotProduct, 0.10, 1.0)
+            end
+            
+            if exactSpeed < lastSpeed * 0.85 then
+                local decelerationRatio = exactSpeed / lastSpeed
+                jukeFactor = jukeFactor * math.clamp(decelerationRatio, 0.05, 1.0)
+            end
+        end
+    end
+
+    local velocityScale = math.clamp(exactSpeed / MAX_WALKSPEED, 0, 1)
+    if exactSpeed < 12 then
+        velocityScale = math.pow(velocityScale, 1.4)
+    end
+
+    local shortRangeBoost = distance < 20 and 1.15 or 1.0
+    local dynamicScale = (1.0 + (distance * 0.004)) * shortRangeBoost
+    local maxElasticCap = math.clamp(distance * 0.38, 3.5, 13.5)
+    
+    local hPredConfig = GetFlag("KnifeHorizSlider", 145) / 1000
+    local vPredConfig = GetFlag("KnifeVertSlider", 40) / 1000
+
+    local horizontalOffset = horizontalVelocity * (hPredConfig * 6.8) * travelTime * dynamicScale * jukeFactor * velocityScale
+    if horizontalOffset:Dot(horizontalOffset) > (maxElasticCap * maxElasticCap) then 
+        horizontalOffset = horizontalOffset.Unit * maxElasticCap 
+    end
+
+    local verticalOffset = Vector3.new(0, 0, 0)
+    local isAir = (humanoid.FloorMaterial == Enum.Material.Air)
+    local absYVelocity = math.abs(smoothVelocity.Y)
+
+    if isAir then
+        local verticalVelocity = math.clamp(smoothVelocity.Y, -18, 25)
+        local verticalDistanceScale = 1 / (1 + (distance * 0.005))
+        verticalVelocity = verticalVelocity * (verticalVelocity < -1 and 0.40 or 0.70)
+        verticalOffset = Vector3.new(0, verticalVelocity * (vPredConfig * 6.0) * travelTime * verticalDistanceScale, 0)
+    elseif absYVelocity > 0.02 then
+        local verticalVelocity = smoothVelocity.Y
+        local rampCompensationFactor = 1.35
+        local sliderScale = (vPredConfig / 0.040)
+        verticalOffset = Vector3.new(0, verticalVelocity * travelTime * sliderScale * rampCompensationFactor, 0)
+    end
+
+    local finalPredictedPos = targetPosition + horizontalOffset + verticalOffset
+    
+    table.clear(wallFilterTable)
+    wallFilterTable[1] = targetChar
+    wallFilterTable[2] = LocalPlayer.Character
+    wallFilterTable[3] = Camera
+    raycastParams.FilterDescendantsInstances = wallFilterTable
+    
+    local wallRay = workspace:Raycast(targetPosition, finalPredictedPos - targetPosition, raycastParams)
+    if wallRay and wallRay.Instance and wallRay.Instance.CanCollide then
+        local hitDistance = (wallRay.Position - targetPosition).Magnitude
+        if hitDistance > 0.5 then
+            finalPredictedPos = targetPosition + (finalPredictedPos - targetPosition).Unit * (hitDistance - 0.4)
+        else
+            finalPredictedPos = targetPosition
+        end
+    end
+
+    return targetPosition, finalPredictedPos
+end
+
+-- UI Setup
+local MurderTab = KillerHub:CreateTab("Murder", "rbxassetid://104386785713574")
+
+MurderTab:CreateSection("Knife Combats")
+MurderTab:CreateToggle("KnifeAimActive", "Knife Thrown aim", function(state) end)
+MurderTab:CreateDropdown("KnifeAimType", "Type of throw aim", {"Target FOV", "Nearest Player"}, function(selected) end)
+MurderTab:CreateToggle("PrioritizeSheriffActive", "Prioritize Sheriff", function(state) end)
+MurderTab:CreateToggle("KnifeWallCheckActive", "Wall Check", function(state) end)
+
+MurderTab:CreateDropdown("KnifeThrowType", "Knife throwing type", {"Normal", "Fast"}, function(selected) end)
+MurderTab:CreateSlider("KnifeThrowDistance", "Throw Advance Distance", 0, 100, function(value) end)
+
+MurderTab:CreateSlider("KnifeHorizSlider", "Horizontal prediction", 0, 300, function(value) end)
+MurderTab:CreateSlider("KnifeVertSlider", "Vertical prediction", 0, 120, function(value) end)
+
+MurderTab:CreateSection("Stab Hitbox Modifier")
+MurderTab:CreateToggle("StabHitboxMaster", "Stab Hitbox", function(state) end)
+MurderTab:CreateToggle("SeeHitboxActive", "See hitbox", function(state) end)
+MurderTab:CreateSlider("HitboxSizeSlider", "Stab Hitbox Size", 2, 30, function(value) end)
+MurderTab:CreateSlider("HitboxTransparencySlider", "Hitbox transparency", 0, 100, function(value) end)
+
+MurderTab:CreateDropdown("HitboxMaterialDropdown", "Hitbox Material", 
+    {"Plastic", "SmoothPlastic", "Metal", "DiamondPlate", "Glass", "Neon", "ForceField", "Wood"}, 
+    function(selected) end
+)
+
+MurderTab:CreateSection("Visuals & Environment")
+MurderTab:CreateToggle("ShowKnifePredictionVisual", "See prediction", function(state) end)
+MurderTab:CreateToggle("ShowKnifeTracerVisual", "See prediction tracer", function(state) end)
+MurderTab:CreateToggle("SmartHandVisibility", "Smart Visibility", function(state) end)
+
+MurderTab:CreateSection("Modify FOV")
+MurderTab:CreateToggleColorPicker("FovVisibleMurder", "FovColorMurder", "Show FOV Circle", Color3.fromRGB(0, 255, 185), function(state) end, function(color) end)
+MurderTab:CreateSlider("FovRadiusMurder", "FOV Radius", 30, 600, function(value) end)
+
+-- LOOPS OPTIMIZADOS
+local hbConn = RunService.Heartbeat:Connect(function()
+    local silentAimActive = GetFlag("KnifeAimActive", false)
+    local hitboxActive = GetFlag("StabHitboxMaster", false)
+    local smartVis = GetFlag("SmartHandVisibility", false)
+    local hasKnife = hasKnifeInInventory()
+
+    -- Ahorrador de recursos: Si Smart Visibility está activado y NO hay cuchillo, pausamos cálculos de aimbot
+    local shouldRunAimLogic = silentAimActive and (not smartVis or hasKnife)
+
+    if shouldRunAimLogic then
+        getClosestTargetToFOV()
+    else
+        cachedTarget = nil
+    end
+
+    -- Restaurar Hitbox si se desactiva
+    if not hitboxActive and wasHitboxActive then
+        wasHitboxActive = false
+        local allPlayers = Players:GetPlayers()
+        for i = 1, #allPlayers do
+            local player = allPlayers[i]
+            if player ~= LocalPlayer and player.Character then
+                local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    hrp.Size = Vector3.new(2, 2, 1)
+                    hrp.Transparency = 1
+                    hrp.Material = Enum.Material.Plastic
+                end
+            end
+        end
+    end
+
+    if not shouldRunAimLogic and not hitboxActive then return end
+    if hitboxActive then wasHitboxActive = true end
+
+    local currentTime = os.clock()
+    local seeHitbox = GetFlag("SeeHitboxActive", false)
+    local hitboxSize = GetFlag("HitboxSizeSlider", 2)
+    local transSlider = GetFlag("HitboxTransparencySlider", 0)
+    local targetTransparency = math.clamp(transSlider, 0, 100) / 100
+    local matEnum = getMaterialEnum(GetFlag("HitboxMaterialDropdown", "Plastic"))
+    local allPlayers = Players:GetPlayers()
+
+    for i = 1, #allPlayers do
+        local player = allPlayers[i]
+        if player ~= LocalPlayer and player.Character then
+            local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+            
+            if hrp then
+                -- Modificación de Hitbox con comprobación rápida
+                if hitboxActive then
+                    local targetSize = Vector3.new(hitboxSize, hitboxSize, hitboxSize)
+                    if hrp.Size ~= targetSize then hrp.Size = targetSize end
+                    if hrp.CanCollide then hrp.CanCollide = false end
+
+                    if seeHitbox then
+                        if hrp.Transparency ~= targetTransparency then hrp.Transparency = targetTransparency end
+                        if hrp.Material ~= matEnum then hrp.Material = matEnum end
+                    else
+                        if hrp.Transparency ~= 1 then hrp.Transparency = 1 end
+                    end
+                end
+
+                -- Cálculo de Física para Silent Aim
+                if shouldRunAimLogic then
+                    local currentPos = hrp.Position
+                    local physicsVelocity = hrp.AssemblyLinearVelocity
+                    
+                    if not playerFysics[player] then
+                        playerFysics[player] = { 
+                            LastPos = currentPos, 
+                            LastTime = currentTime, 
+                            SmoothedVelocity = physicsVelocity, 
+                            LastVelocity = physicsVelocity,
+                            LastRawVelocity = physicsVelocity,
+                            ConsecutiveSameVelocity = 0,
+                            IsLaggingOut = false
+                        }
+                    else
+                        local data = playerFysics[player]
+                        local deltaTime = currentTime - data.LastTime
+                        
+                        if deltaTime > 0 then
+                            local positionalVelocity = (currentPos - data.LastPos) / deltaTime
+                            local realVelocity = Vector3.new(physicsVelocity.X, positionalVelocity.Y, physicsVelocity.Z)
+                            
+                            local diffVel = realVelocity - data.LastRawVelocity
+                            if data.LastRawVelocity and diffVel:Dot(diffVel) < 0.000001 then
+                                data.ConsecutiveSameVelocity = data.ConsecutiveSameVelocity + 1
+                            else
+                                data.ConsecutiveSameVelocity = 0
+                            end
+                            
+                            data.LastRawVelocity = realVelocity
+                            
+                            if data.ConsecutiveSameVelocity > 20 and realVelocity:Dot(realVelocity) > 1 then
+                                data.IsLaggingOut = true
+                                realVelocity = Vector3.new(0, 0, 0)
+                            else
+                                data.IsLaggingOut = false
+                            end
+                            
+                            if positionalVelocity:Dot(positionalVelocity) > 3025 then 
+                                realVelocity = Vector3.new(0, 0, 0) 
+                            end
+                            
+                            data.LastVelocity = data.SmoothedVelocity
+                            data.SmoothedVelocity = data.SmoothedVelocity:Lerp(realVelocity, 0.20)
+                        end
+                        
+                        data.LastPos = currentPos
+                        data.LastTime = currentTime
+                    end
+                end
+            end
+        end
+    end
+end)
+KillerHub:AddTask(hbConn)
+
+local rsConn = RunService.RenderStepped:Connect(function()
+    local silentAimActive = GetFlag("KnifeAimActive", false)
+
+    -- Si apagas el Silent Aim, apaga todo inmediatamente
+    if not silentAimActive then
+        FOVCircle.Visible = false
+        PredDotCenter.Visible = false
+        PredRingOuter.Visible = false
+        PredLine.Visible = false
+        TracerLine.Visible = false
+        return
+    end
+
+    local hasKnife = hasKnifeInInventory()
+    local smartVis = GetFlag("SmartHandVisibility", false)
+
+    -- Ahorrador de recursos: Si Smart Visibility está encendido y no hay cuchillo, ocultar todo
+    if smartVis and not hasKnife then
+        FOVCircle.Visible = false
+        PredDotCenter.Visible = false
+        PredRingOuter.Visible = false
+        PredLine.Visible = false
+        TracerLine.Visible = false
+        return
+    end
+
+    -- FOV Circle
+    local showFOV = GetFlag("FovVisibleMurder", false)
+    if showFOV then
+        FOVCircle.Position = cachedScreenCenter
+        FOVCircle.Radius = GetFlag("FovRadiusMurder", 150) * cachedDpiScale
+        FOVCircle.Thickness = 0.8 * cachedDpiScale
+        FOVCircle.Color = GetFlag("FovColorMurder", Color3.fromRGB(0, 255, 185))
+        FOVCircle.Visible = true
+    else
+        FOVCircle.Visible = false
+    end
+
+    local activeTarget = cachedTarget
+
+    -- Standard Prediction Visuals (Circles & Connection Line)
+    local showPred = GetFlag("ShowKnifePredictionVisual", false)
+    if showPred and activeTarget and activeTarget.Character then
+        local basePos, rawPredictedPos = getAdvancedKnifePrediction(activeTarget.Character)
+        if basePos and rawPredictedPos then
+            lastActualPosition = lastActualPosition:Lerp(basePos, 0.28)
+            lastVisualPosition = lastVisualPosition:Lerp(rawPredictedPos, 0.28)
+            
+            local screenPosBase, onScreenBase = Camera:WorldToViewportPoint(lastActualPosition)
+            local screenPosPred, onScreenPred = Camera:WorldToViewportPoint(lastVisualPosition)
+            
+            if onScreenBase and onScreenPred then
+                local drawBase = Vector2.new(screenPosBase.X, screenPosBase.Y)
+                local drawPred = Vector2.new(screenPosPred.X, screenPosPred.Y)
+                
+                PredDotCenter.Radius = 2.5 * cachedDpiScale
+                PredDotCenter.Thickness = 1 * cachedDpiScale
+                PredRingOuter.Radius = 6.0 * cachedDpiScale
+                PredRingOuter.Thickness = 1.2 * cachedDpiScale
+                PredLine.Thickness = 1.0 * cachedDpiScale
+
+                PredDotCenter.Position = drawBase
+                PredRingOuter.Position = drawPred
+                PredLine.From = drawBase
+                PredLine.To = drawPred
+                
+                local lineDiff = drawBase - drawPred
+                PredLine.Visible = lineDiff:Dot(lineDiff) >= (2.25 * cachedDpiScale * cachedDpiScale)
+                PredDotCenter.Visible = true
+                PredRingOuter.Visible = true
+            else
+                PredDotCenter.Visible = false; PredRingOuter.Visible = false; PredLine.Visible = false
+            end
+        else
+            PredDotCenter.Visible = false; PredRingOuter.Visible = false; PredLine.Visible = false
+        end
+    else
+        PredDotCenter.Visible = false; PredRingOuter.Visible = false; PredLine.Visible = false
+        if activeTarget and activeTarget.Character then
+            local hrp = activeTarget.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                lastActualPosition = hrp.Position
+                lastVisualPosition = hrp.Position
+            end
+        end
+    end
+
+    -- Prediction Tracer Visual (Morado Void desde Mano Derecha)
+    local showTracer = GetFlag("ShowKnifeTracerVisual", false)
+    if showTracer and activeTarget and activeTarget.Character then
+        local _, rawPredictedPos = getAdvancedKnifePrediction(activeTarget.Character)
+        if rawPredictedPos then
+            -- 80% reactividad / 20% suavizado en la respuesta
+            lastTracerPosition = lastTracerPosition:Lerp(rawPredictedPos, 0.80)
+
+            local char = LocalPlayer.Character
+            local rightHand = char and (char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm"))
+            local originWorld = rightHand and rightHand.Position or (char and char:FindFirstChild("HumanoidRootPart") and char.HumanoidRootPart.Position)
+
+            if originWorld then
+                local screenHand, onScreenHand = Camera:WorldToViewportPoint(originWorld)
+                local screenPred, onScreenPred = Camera:WorldToViewportPoint(lastTracerPosition)
+
+                if onScreenHand or onScreenPred then
+                    TracerLine.From = Vector2.new(screenHand.X, screenHand.Y)
+                    TracerLine.To = Vector2.new(screenPred.X, screenPred.Y)
+                    TracerLine.Thickness = 1.0 * cachedDpiScale
+                    TracerLine.Visible = true
+                else
+                    TracerLine.Visible = false
+                end
+            else
+                TracerLine.Visible = false
+            end
+        else
+            TracerLine.Visible = false
+        end
+    else
+        TracerLine.Visible = false
+        if activeTarget and activeTarget.Character then
+            local hrp = activeTarget.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then lastTracerPosition = hrp.Position end
+        end
+    end
+end)
+KillerHub:AddTask(rsConn)
+
+-- Hooks para Silent Aim
+local ClientServices = ReplicatedStorage:WaitForChild("ClientServices", 5)
+if ClientServices then
+    local WeaponService = require(ClientServices:WaitForChild("WeaponService"))
+    local oldGetTargetPosition = WeaponService.GetTargetPosition
+    local oldGetMouseTargetCFrame = WeaponService.GetMouseTargetCFrame
+
+    WeaponService.GetTargetPosition = function(self, ...)
+        local silentAim = GetFlag("KnifeAimActive", false)
+        if silentAim and hasKnifeInInventory() then
+            local targetPlayer = cachedTarget or getClosestTargetToFOV()
+            if targetPlayer and targetPlayer.Character then
+                local _, predictedPos = getAdvancedKnifePrediction(targetPlayer.Character)
+                if predictedPos then return CFrame.new(predictedPos) end
+            end
+        end
+        return oldGetTargetPosition(self, ...)
+    end
+
+    WeaponService.GetMouseTargetCFrame = function(self, ...)
+        local silentAim = GetFlag("KnifeAimActive", false)
+        if silentAim and hasKnifeInInventory() then
+            local targetPlayer = cachedTarget or getClosestTargetToFOV()
+            if targetPlayer and targetPlayer.Character then
+                local _, predictedPos = getAdvancedKnifePrediction(targetPlayer.Character)
+                if predictedPos then return CFrame.new(predictedPos) end
+            end
+        end
+        return oldGetMouseTargetCFrame(self, ...)
+    end
+end
+
+-- Namecall hook
+local rawNamecall
+rawNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+
+    if not checkcaller() and method == "FireServer" and self.Name == "KnifeThrown" then
+        local throwType = GetFlag("KnifeThrowType", "Normal")
+        local throwDistConfig = GetFlag("KnifeThrowDistance", 14)
+        
+        if throwType == "Fast" and throwDistConfig > 0 and #args >= 2 and typeof(args[1]) == "CFrame" and typeof(args[2]) == "CFrame" then
+            local originCF = args[1]
+            local targetCF = args[2]
+            
+            local direction = (targetCF.Position - originCF.Position)
+            local dist = direction.Magnitude
+            
+            if dist > 0 then
+                local lookDir = direction.Unit
+                local advanceDistance = math.min(throwDistConfig, dist * 0.75)
+                
+                args[1] = originCF + (lookDir * advanceDistance)
+            end
+            
+            return rawNamecall(self, unpack(args))
+        end
+    end
+
+    return rawNamecall(self, ...)
+end))
+
+
 --==============================================================================
--- KILLER HUB UI - COMBINED MODULE (ROLE & DEAD DETECTION VIA PlayerDataChanged)
+-- KILLER HUB UI - COMBINED MODULE (FIXED POS PERSISTENCE & OPTIMIZED)
 -- Creator: Killer Hub | By Paolo
 --==============================================================================
 
-local KillerHub = loadstring(game:HttpGet("https://raw.githubusercontent.com/paoloskibidipro/noname/refs/heads/main/unknow.lua"))()
 
 if getgenv().__KillerHub_Combined_Loaded then
     KillerHub:NotifyWarn("Already Loaded", "The script is already running.", 3)
@@ -12,6 +774,7 @@ end
 getgenv().__KillerHub_Combined_Loaded = true
 
 -- Services Caching
+local HttpService = game:GetService("HttpService")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
@@ -21,6 +784,7 @@ local Lighting = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local VirtualUser = game:GetService("VirtualUser")
+local UserInputService = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -33,9 +797,122 @@ local string_format = string.format
 local Vector3_zero = Vector3.zero
 
 --------------------------------------------------------------------------------
--- 1. TAB CREATION
+-- PERSISTENCE FOR POSITIONS (FIXED)
+--------------------------------------------------------------------------------
+local CONFIG_FILE = "KillerHub_Positions.json"
+
+-- Default positions
+local timerPos = UDim2.new(0.5, 0, 0.01, 0)
+getgenv().KillerHub_PerfPos = getgenv().KillerHub_PerfPos or UDim2.new(0.85, 0, 0.01, 0)
+
+local function LoadCustomPositions()
+    local success, result = pcall(function()
+        if readfile and isfile and isfile(CONFIG_FILE) then
+            return HttpService:JSONDecode(readfile(CONFIG_FILE))
+        end
+    end)
+    if success and type(result) == "table" then
+        if result.timerPos then
+            timerPos = UDim2.new(result.timerPos.XS, result.timerPos.XO, result.timerPos.YS, result.timerPos.YO)
+        end
+        if result.perfPos then
+            getgenv().KillerHub_PerfPos = UDim2.new(result.perfPos.XS, result.perfPos.XO, result.perfPos.YS, result.perfPos.YO)
+        end
+    end
+end
+
+local function SaveCustomPositions()
+    pcall(function()
+        if writefile then
+            local data = {
+                timerPos = {XS = timerPos.X.Scale, XO = timerPos.X.Offset, YS = timerPos.Y.Scale, YO = timerPos.Y.Offset},
+                perfPos = {XS = getgenv().KillerHub_PerfPos.X.Scale, XO = getgenv().KillerHub_PerfPos.X.Offset, YS = getgenv().KillerHub_PerfPos.Y.Scale, YO = getgenv().KillerHub_PerfPos.Y.Offset}
+            }
+            writefile(CONFIG_FILE, HttpService:JSONEncode(data))
+        end
+    end)
+end
+
+LoadCustomPositions()
+
+local knifeESPColor = Color3.fromRGB(0, 255, 100)
+local timerSize = 38
+local timerFontEnum = Enum.Font.SciFi
+local timerPreviewActive = false
+
+local perfThemeColor = Color3.fromRGB(160, 60, 255)
+local perfStyle = "Horizontal Bar"
+local perfScale = 1.0
+local perfPreviewActive = false
+local statsBgTransparency = 0.25
+
+local FontMap = {
+    SciFi = Enum.Font.SciFi,
+    GothamBold = Enum.Font.GothamBold,
+    Arcade = Enum.Font.Arcade,
+    FredokaOne = Enum.Font.FredokaOne,
+    SourceSansBold = Enum.Font.SourceSansBold,
+    Fantasy = Enum.Font.Fantasy,
+    Creepster = Enum.Font.Creepster,
+    LuckiestGuy = Enum.Font.LuckiestGuy,
+    Bangers = Enum.Font.Bangers,
+    PermanentMarker = Enum.Font.PermanentMarker
+}
+
+--------------------------------------------------------------------------------
+-- DRAG SYSTEM HELPER
+--------------------------------------------------------------------------------
+local function MakeDraggable(guiObject, getPreviewState, onPosUpdate)
+    local dragging = false
+    local dragInput, dragStart, startPos
+
+    guiObject.InputBegan:Connect(function(input)
+        if not getPreviewState() then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = guiObject.Position
+
+            local conn
+            conn = input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                    if conn then conn:Disconnect() end
+                    SaveCustomPositions() -- Save when dragging ends
+                end
+            end)
+        end
+    end)
+
+    guiObject.InputChanged:Connect(function(input)
+        if not getPreviewState() then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input == dragInput and getPreviewState() then
+            local delta = input.Position - dragStart
+            local newPos = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+            guiObject.Position = newPos
+            if onPosUpdate then onPosUpdate(newPos) end
+        end
+    end)
+end
+
+--------------------------------------------------------------------------------
+-- TAB & SUB-PAGE CREATION
 --------------------------------------------------------------------------------
 local TabExtras = KillerHub:CreateTab("Extras", "Code")
+local PageExtrasGeneral = TabExtras:CreatePage("General", "Code")
+local PageExtrasEdit = TabExtras:CreatePage("Edit", "Gear")
+
 local TabAutoFarm = KillerHub:CreateTab("Auto Farm", "Robot")
 
 --------------------------------------------------------------------------------
@@ -51,7 +928,66 @@ end
 local statsConnection = nil
 local statsGui = nil
 local statsFrame = nil
-local statsBgTransparency = 0.25
+local statsStroke = nil
+local statsTextLabel = nil
+
+local function SavePerfPosition(pos)
+    getgenv().KillerHub_PerfPos = pos
+end
+
+local function UpdatePerfStyle()
+    if not statsFrame then return end
+    
+    statsFrame.Position = getgenv().KillerHub_PerfPos
+    statsFrame.AnchorPoint = Vector2.new(0.5, 0)
+    statsFrame.Active = perfPreviewActive
+
+    local baseW, baseH = 260, 32
+
+    if perfStyle == "Horizontal Bar" then
+        baseW, baseH = 260, 32
+        statsFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 14)
+        statsFrame.BackgroundTransparency = statsBgTransparency
+        if statsStroke then
+            statsStroke.Enabled = true
+            statsStroke.Color = Color3.fromRGB(40, 40, 50)
+            statsStroke.Thickness = 1
+        end
+    elseif perfStyle == "Minimalist" then
+        baseW, baseH = 135, 62
+        statsFrame.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
+        statsFrame.BackgroundTransparency = statsBgTransparency
+        if statsStroke then statsStroke.Enabled = false end
+    elseif perfStyle == "Glassmorphism" then
+        baseW, baseH = 250, 34
+        statsFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        statsFrame.BackgroundTransparency = math.min(statsBgTransparency + 0.45, 0.85)
+        if statsStroke then
+            statsStroke.Enabled = true
+            statsStroke.Color = Color3.fromRGB(255, 255, 255)
+            statsStroke.Thickness = 1
+        end
+    elseif perfStyle == "Premium Card" then
+        baseW, baseH = 150, 68
+        statsFrame.BackgroundColor3 = Color3.fromRGB(16, 16, 22)
+        statsFrame.BackgroundTransparency = statsBgTransparency
+        if statsStroke then
+            statsStroke.Enabled = true
+            statsStroke.Color = perfThemeColor
+            statsStroke.Thickness = 1
+        end
+    elseif perfStyle == "Line OLED" then
+        baseW, baseH = 240, 28
+        statsFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+        statsFrame.BackgroundTransparency = 0.4
+        if statsStroke then statsStroke.Enabled = false end
+    end
+
+    statsFrame.Size = UDim2.new(0, math_floor(baseW * perfScale), 0, math_floor(baseH * perfScale))
+    if statsTextLabel then
+        statsTextLabel.TextSize = math_floor(12 * perfScale)
+    end
+end
 
 local function CleanUpPerfOverlay()
     if statsConnection then
@@ -62,12 +998,123 @@ local function CleanUpPerfOverlay()
         statsGui:Destroy()
         statsGui = nil
         statsFrame = nil
+        statsStroke = nil
+        statsTextLabel = nil
     end
+end
+
+local function CreatePerfOverlay()
+    CleanUpPerfOverlay()
+    
+    statsGui = Instance.new("ScreenGui")
+    statsGui.Name = "KillerHub_PerformanceOverlay"
+    statsGui.ResetOnSpawn = false
+
+    statsFrame = Instance.new("Frame")
+    statsFrame.Size = UDim2.new(0, 260, 0, 32)
+    statsFrame.Position = getgenv().KillerHub_PerfPos
+    statsFrame.AnchorPoint = Vector2.new(0.5, 0)
+    statsFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 14)
+    statsFrame.BackgroundTransparency = statsBgTransparency
+    statsFrame.BorderSizePixel = 0
+    statsFrame.Active = perfPreviewActive
+
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(0, 16)
+    Corner.Parent = statsFrame
+
+    statsStroke = Instance.new("UIStroke")
+    statsStroke.Thickness = 1
+    statsStroke.Color = Color3.fromRGB(40, 40, 50)
+    statsStroke.Parent = statsFrame
+
+    statsTextLabel = Instance.new("TextLabel")
+    statsTextLabel.Size = UDim2.new(1, -12, 1, 0)
+    statsTextLabel.Position = UDim2.new(0, 6, 0, 0)
+    statsTextLabel.BackgroundTransparency = 1
+    statsTextLabel.TextXAlignment = Enum.TextXAlignment.Center
+    statsTextLabel.TextYAlignment = Enum.TextYAlignment.Center
+    statsTextLabel.Font = Enum.Font.GothamBold
+    statsTextLabel.TextColor3 = Color3.fromRGB(240, 240, 240)
+    statsTextLabel.TextSize = math_floor(12 * perfScale)
+    statsTextLabel.RichText = true
+    statsTextLabel.Text = "Cargando..."
+    statsTextLabel.Active = false
+    statsTextLabel.Parent = statsFrame
+
+    MakeDraggable(statsFrame, function() return perfPreviewActive end, function(newPos)
+        SavePerfPosition(newPos)
+    end)
+
+    statsFrame.Parent = statsGui
+    UpdatePerfStyle()
+
+    if syn and syn.protect_gui then
+        syn.protect_gui(statsGui)
+        statsGui.Parent = CoreGui
+    elseif gethui then
+        statsGui.Parent = gethui()
+    else
+        statsGui.Parent = CoreGui
+    end
+
+    local lastTime = os_clock()
+    local frameCount = 0
+    local currentFps = 60
+    local pingObject = nil
+    pcall(function() pingObject = StatsService.Network.ServerStatsItem["Data Ping"] end)
+
+    -- OPTIMIZED: Increased update interval from 0.5s to 1.0s to reduce RAM/CPU polling overhead
+    statsConnection = RunService.Heartbeat:Connect(function()
+        frameCount = frameCount + 1
+        local currentTime = os_clock()
+        
+        if currentTime - lastTime >= 1.0 then
+            currentFps = math_round(frameCount / (currentTime - lastTime))
+            frameCount = 0
+            lastTime = currentTime
+            
+            local ping = 0
+            if pingObject then
+                pcall(function() ping = math_round(pingObject:GetValue()) end)
+            elseif LocalPlayer then
+                pcall(function() ping = math_round(LocalPlayer:GetNetworkPing() * 1000) end)
+            end
+            
+            local memoria = math_round(StatsService:GetTotalMemoryUsageMb())
+            local colorHex = string_format("%d,%d,%d", math_floor(perfThemeColor.R*255), math_floor(perfThemeColor.G*255), math_floor(perfThemeColor.B*255))
+
+            if perfStyle == "Horizontal Bar" or perfStyle == "Glassmorphism" or perfStyle == "Line OLED" then
+                statsTextLabel.TextXAlignment = Enum.TextXAlignment.Center
+                statsTextLabel.Text = string_format(
+                    "FPS: <font color=\"rgb(%s)\">%d</font>    |    PING: <font color=\"rgb(0,230,140)\">%d ms</font>    |    RAM: <font color=\"rgb(220,220,220)\">%d MB</font>",
+                    colorHex, currentFps, ping, memoria
+                )
+            else
+                statsTextLabel.TextXAlignment = Enum.TextXAlignment.Left
+                statsTextLabel.Text = string_format(
+                    "FPS: <font color=\"rgb(%s)\">%d</font>\nPING: <font color=\"rgb(0,230,140)\">%d ms</font>\nRAM: <font color=\"rgb(220,220,220)\">%d MB</font>",
+                    colorHex, currentFps, ping, memoria
+                )
+            end
+        end
+    end)
 end
 
 -- Round Time UI
 local RoundTimerGui = nil
 local RoundTimerConnection = nil
+local TimeLabelRef = nil
+
+local function UpdateTimerStyle()
+    if TimeLabelRef then
+        TimeLabelRef.Position = timerPos
+        TimeLabelRef.AnchorPoint = Vector2.new(0.5, 0)
+        TimeLabelRef.TextSize = timerSize
+        TimeLabelRef.Font = timerFontEnum
+        TimeLabelRef.Active = timerPreviewActive
+    end
+end
 
 local function CreateTimerUI()
     if RoundTimerGui then RoundTimerGui:Destroy() end
@@ -79,17 +1126,23 @@ local function CreateTimerUI()
 
     local TimeLabel = Instance.new("TextLabel")
     TimeLabel.Name = "TimeText"
-    TimeLabel.Size = UDim2.new(0, 250, 0, 40)
-    TimeLabel.Position = UDim2.new(0.5, -125, 0, -5)
+    TimeLabel.Size = UDim2.new(0, 300, 0, 50)
+    TimeLabel.Position = timerPos
+    TimeLabel.AnchorPoint = Vector2.new(0.5, 0)
     TimeLabel.BackgroundTransparency = 1
-    TimeLabel.Font = Enum.Font.SciFi
-    TimeLabel.TextSize = 38
+    TimeLabel.Font = timerFontEnum
+    TimeLabel.TextSize = timerSize
     TimeLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
     TimeLabel.TextStrokeTransparency = 0.3
     TimeLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
     TimeLabel.Text = ""
     TimeLabel.Visible = false
+    TimeLabel.Active = timerPreviewActive
     TimeLabel.Parent = ScreenGui
+
+    MakeDraggable(TimeLabel, function() return timerPreviewActive end, function(newPos)
+        timerPos = newPos
+    end)
 
     if syn and syn.protect_gui then
         syn.protect_gui(ScreenGui)
@@ -101,6 +1154,7 @@ local function CreateTimerUI()
     end
 
     RoundTimerGui = ScreenGui
+    TimeLabelRef = TimeLabel
     return TimeLabel
 end
 
@@ -108,6 +1162,7 @@ local function RemoveTimerUI()
     if RoundTimerGui then
         RoundTimerGui:Destroy()
         RoundTimerGui = nil
+        TimeLabelRef = nil
     end
 end
 
@@ -128,7 +1183,7 @@ local function CreateKnifeBox(targetPart)
 
     local box = Instance.new("BoxHandleAdornment")
     box.Name = "KillerHub_CleanKnifeBox"
-    box.Color3 = Color3.fromRGB(0, 255, 100)
+    box.Color3 = knifeESPColor
     box.Transparency = 0.3
     box.AlwaysOnTop = true
     box.ZIndex = 5
@@ -226,7 +1281,7 @@ local function CreateTrapBox(targetPart)
     ActiveTrapAdornments[targetPart] = box
 end
 
--- No Lights Logic
+-- No Lights Logic (OPTIMIZED TO PREVENT FREEZES)
 local NoLightsConnection = nil
 local OriginalMaterials = {}
 local OriginalLightProps = {}
@@ -289,111 +1344,45 @@ local function RestoreOriginalLights()
 end
 
 --------------------------------------------------------------------------------
--- EXTRAS CONTROLS
+-- PAGE GENERAL (EXTRAS)
 --------------------------------------------------------------------------------
-TabExtras:CreateSection("Performance")
+PageExtrasGeneral:CreateSection("Performance")
 
-TabExtras:CreateToggle("Extras_PerformanceStats", "Show Stats", function(estado)
-    CleanUpPerfOverlay()
-    
+PageExtrasGeneral:CreateToggle("Extras_PerformanceStats", "Show Stats", function(estado)
     if estado then
-        statsGui = Instance.new("ScreenGui")
-        statsGui.Name = "KillerHub_PerformanceOverlay"
-        statsGui.ResetOnSpawn = false
-
-        statsFrame = Instance.new("Frame")
-        statsFrame.Size = UDim2.new(0, 155, 0, 72)
-        statsFrame.Position = UDim2.new(1, -162, 0, 2)
-        statsFrame.BackgroundColor3 = Color3.fromRGB(12, 4, 22)
-        statsFrame.BackgroundTransparency = statsBgTransparency
-        statsFrame.BorderSizePixel = 0
-
-        local Corner = Instance.new("UICorner")
-        Corner.CornerRadius = UDim.new(0, 8)
-        Corner.Parent = statsFrame
-
-        local Stroke = Instance.new("UIStroke")
-        Stroke.Thickness = 1.2
-        Stroke.Color = Color3.fromRGB(40, 15, 65)
-        Stroke.Parent = statsFrame
-
-        local TextLabel = Instance.new("TextLabel")
-        TextLabel.Size = UDim2.new(1, -10, 1, -6)
-        TextLabel.Position = UDim2.new(0, 8, 0, 3)
-        TextLabel.BackgroundTransparency = 1
-        TextLabel.TextXAlignment = Enum.TextXAlignment.Left
-        TextLabel.Font = Enum.Font.GothamBold
-        TextLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
-        TextLabel.TextSize = 12
-        TextLabel.LineHeight = 1.25
-        TextLabel.RichText = true
-        TextLabel.Text = "Loading..."
-        TextLabel.Parent = statsFrame
-
-        statsFrame.Parent = statsGui
-
-        if syn and syn.protect_gui then
-            syn.protect_gui(statsGui)
-            statsGui.Parent = CoreGui
-        elseif gethui then
-            statsGui.Parent = gethui()
-        else
-            statsGui.Parent = CoreGui
+        CreatePerfOverlay()
+    else
+        if not perfPreviewActive then
+            CleanUpPerfOverlay()
         end
-
-        local lastTime = os_clock()
-        local frameCount = 0
-        local currentFps = 60
-        local pingObject = nil
-        pcall(function() pingObject = StatsService.Network.ServerStatsItem["Data Ping"] end)
-
-        statsConnection = RunService.Heartbeat:Connect(function()
-            frameCount = frameCount + 1
-            local currentTime = os_clock()
-            
-            if currentTime - lastTime >= 0.4 then
-                currentFps = math_round(frameCount / (currentTime - lastTime))
-                frameCount = 0
-                lastTime = currentTime
-                
-                local ping = 0
-                if pingObject then
-                    pcall(function() ping = math_round(pingObject:GetValue()) end)
-                elseif LocalPlayer then
-                    pcall(function() ping = math_round(LocalPlayer:GetNetworkPing() * 1000) end)
-                end
-                
-                local memoria = math_round(StatsService:GetTotalMemoryUsageMb())
-                
-                TextLabel.Text = string_format(
-                    "FPS: <font color=\"rgb(160,60,255)\">%d</font>\nPING: <font color=\"rgb(0,255,120)\">%d ms</font>\nRAM: <font color=\"rgb(240,240,240)\">%d MB</font>",
-                    currentFps,
-                    ping,
-                    memoria
-                )
-            end
-        end)
     end
 end)
 
-TabExtras:CreateSlider("Extras_StatsOpacity", "BG Opacity (%)", 0, 100, function(valor)
+PageExtrasGeneral:CreateSlider("Extras_StatsOpacity", "BG Opacity (%)", 0, 100, function(valor)
     statsBgTransparency = valor / 100
-    if statsFrame then
-        statsFrame.BackgroundTransparency = statsBgTransparency
-    end
+    UpdatePerfStyle()
 end)
 
-TabExtras:CreateSection("Round Info")
+PageExtrasGeneral:CreateSection("Round Info")
 
-TabExtras:CreateToggle("Extras_ShowRoundTime", "Round Time", function(enabled)
-    if enabled then
-        local label = CreateTimerUI()
+PageExtrasGeneral:CreateToggle("Extras_ShowRoundTime", "Round Time", function(enabled)
+    if enabled or timerPreviewActive then
+        local label = TimeLabelRef or CreateTimerUI()
         local zeroTime = nil
         local lastCheck = 0
+
+        if RoundTimerConnection then RoundTimerConnection:Disconnect() end
 
         RoundTimerConnection = RunService.Heartbeat:Connect(function()
             if os_clock() - lastCheck < 0.25 then return end
             lastCheck = os_clock()
+
+            if timerPreviewActive then
+                label.Visible = true
+                label.Text = "06:67"
+                label.TextColor3 = Color3.fromRGB(0, 255, 150)
+                return
+            end
 
             local timerPart = Workspace:FindFirstChild("RoundTimerPart")
             if timerPart then
@@ -428,17 +1417,18 @@ TabExtras:CreateToggle("Extras_ShowRoundTime", "Round Time", function(enabled)
     end
 end)
 
-TabExtras:CreateSection("Visuals")
+PageExtrasGeneral:CreateSection("Visuals")
 
-TabExtras:CreateToggle("Extras_NoLights", "No lights", function(enabled)
+PageExtrasGeneral:CreateToggle("Extras_NoLights", "No lights", function(enabled)
     if enabled then
         ApplyNoLightsSettings()
         
+        -- OPTIMIZED: Asynchronous batched iteration to prevent lag spikes on mobile
         task.spawn(function()
             local descendants = Workspace:GetDescendants()
             for i = 1, #descendants do
                 RemoveBrightGlaring(descendants[i])
-                if i % 400 == 0 then
+                if i % 200 == 0 then
                     task.wait()
                 end
             end
@@ -458,11 +1448,11 @@ TabExtras:CreateToggle("Extras_NoLights", "No lights", function(enabled)
     end
 end)
 
-TabExtras:CreateToggle("Extras_SeeKnifeESP", "Knife ESP", function(enabled)
+PageExtrasGeneral:CreateToggle("Extras_SeeKnifeESP", "Knife ESP", function(enabled)
     if enabled then
         local lastScan = 0
         KnifeESP_Connection = RunService.Heartbeat:Connect(function()
-            if os_clock() - lastScan < 0.2 then return end
+            if os_clock() - lastScan < 0.3 then return end -- Slightly increased interval for better performance
             lastScan = os_clock()
 
             local currentTargets = {}
@@ -534,7 +1524,7 @@ TabExtras:CreateToggle("Extras_SeeKnifeESP", "Knife ESP", function(enabled)
     end
 end)
 
-TabExtras:CreateToggle("Extras_SeeTraps", "Traps ESP", function(enabled)
+PageExtrasGeneral:CreateToggle("Extras_SeeTraps", "Traps ESP", function(enabled)
     if enabled then
         local lastScan = 0
         TrapsESP_Connection = RunService.Heartbeat:Connect(function()
@@ -576,7 +1566,7 @@ TabExtras:CreateToggle("Extras_SeeTraps", "Traps ESP", function(enabled)
                         validPart = ProcessPartOrModel(child)
                     end
                     if validPart and validPart:IsDescendantOf(Workspace) then
-                        CreateTrapBox(part)
+                        CreateTrapBox(validPart)
                     end
                 end)
             end
@@ -595,7 +1585,96 @@ TabExtras:CreateToggle("Extras_SeeTraps", "Traps ESP", function(enabled)
 end)
 
 --------------------------------------------------------------------------------
--- AUTOFARM MODULE STATE & LOGIC (ACCURATE PLAYER DATA DETECTION)
+-- PAGE EDIT (CUSTOMIZATIONS)
+--------------------------------------------------------------------------------
+PageExtrasEdit:CreateSection("Round Time Customization")
+
+PageExtrasEdit:CreateToggle("Edit_Timer_Preview", "Preview & Drag Mode", function(enabled)
+    timerPreviewActive = enabled
+    if TimeLabelRef then
+        TimeLabelRef.Active = enabled
+    end
+    if enabled then
+        if not TimeLabelRef then
+            CreateTimerUI()
+        end
+        TimeLabelRef.Visible = true
+        TimeLabelRef.Active = true
+        TimeLabelRef.Text = "06:67"
+        TimeLabelRef.TextColor3 = Color3.fromRGB(0, 255, 150)
+    else
+        if not KillerHub.Flags["Extras_ShowRoundTime"] or not KillerHub.Flags["Extras_ShowRoundTime"].CurrentValue then
+            RemoveTimerUI()
+        end
+    end
+end)
+
+PageExtrasEdit:CreateSlider("Edit_Timer_Size", "Text Size", 16, 72, function(val)
+    timerSize = val
+    UpdateTimerStyle()
+end, 38)
+
+PageExtrasEdit:CreateDropdown("Edit_Timer_Font", "Font Style", {
+    "SciFi", "GothamBold", "Arcade", "FredokaOne", "SourceSansBold", "Fantasy",
+    "Creepster", "LuckiestGuy", "Bangers", "PermanentMarker"
+}, function(sel)
+    if FontMap[sel] then
+        timerFontEnum = FontMap[sel]
+        UpdateTimerStyle()
+    end
+end, "SciFi")
+
+PageExtrasEdit:CreateSection("Knife ESP Customization")
+
+PageExtrasEdit:CreateColorPicker("Edit_KnifeESP_Color", "Knife Box Color", Color3.fromRGB(0, 255, 100), function(color)
+    knifeESPColor = color
+    for _, adornment in pairs(ActiveKnifeAdornments) do
+        if adornment then
+            adornment.Color3 = knifeESPColor
+        end
+    end
+end)
+
+PageExtrasEdit:CreateSection("Performance Statistics Customization")
+
+PageExtrasEdit:CreateToggle("Edit_Perf_Preview", "Preview Overlay & Drag", function(enabled)
+    perfPreviewActive = enabled
+    if statsFrame then
+        statsFrame.Active = enabled
+    end
+    if enabled then
+        if not statsGui then
+            CreatePerfOverlay()
+        end
+        if statsFrame then
+            statsFrame.Active = true
+        end
+    else
+        if not KillerHub.Flags["Extras_PerformanceStats"] or not KillerHub.Flags["Extras_PerformanceStats"].CurrentValue then
+            CleanUpPerfOverlay()
+        end
+    end
+end)
+
+PageExtrasEdit:CreateSlider("Edit_Perf_Scale", "Card Scale (%)", 70, 160, function(val)
+    perfScale = val / 100
+    UpdatePerfStyle()
+end, 100)
+
+PageExtrasEdit:CreateDropdown("Edit_Perf_Style", "Card Design", {
+    "Horizontal Bar", "Minimalist", "Glassmorphism", "Premium Card", "Line OLED"
+}, function(sel)
+    perfStyle = sel
+    UpdatePerfStyle()
+end, "Horizontal Bar")
+
+PageExtrasEdit:CreateColorPicker("Edit_Perf_Color", "Accent Color", Color3.fromRGB(160, 60, 255), function(color)
+    perfThemeColor = color
+    UpdatePerfStyle()
+end)
+
+--------------------------------------------------------------------------------
+-- AUTOFARM MODULE STATE & LOGIC
 --------------------------------------------------------------------------------
 local autoFarmEnabled = false
 local autoResetEnabled = false
@@ -608,7 +1687,6 @@ local isBagFullState = false
 local farmThread = nil
 local activeTween = nil
 
--- ESTADOS EXTRAÍDOS DE PlayerDataChanged
 local myRole = nil
 local myDeadState = false
 
@@ -632,13 +1710,11 @@ local function isPlayerAlive()
     return hum and hum.Health > 0 and hrp and hrp.Parent ~= nil
 end
 
--- VERIFICACIÓN ESTRICTA DE ROL Y ESTADO MUERTO
 local function hasValidActiveRole()
     if myDeadState == true then return false end
     if not myRole or myRole == "" or myRole == "None" or myRole == "Spectator" then
         return false
     end
-    -- Roles permitidos en partida
     return myRole == "Innocent" or myRole == "Sheriff" or myRole == "Hero" or myRole == "Murderer"
 end
 
@@ -742,7 +1818,7 @@ local function doAutoReset()
     resetting = false
 end
 
--- ESCUCHA DE EVENTOS REMOTOS Y PlayerDataChanged
+-- REMOTE EVENT LISTENING
 pcall(function()
     local gameplayRemotes = ReplicatedStorage:WaitForChild("Remotes", 3):WaitForChild("Gameplay", 3)
     local PlayerDataChanged = gameplayRemotes and gameplayRemotes:FindFirstChild("PlayerDataChanged")
@@ -750,7 +1826,6 @@ pcall(function()
     local RoundEnd = gameplayRemotes and (gameplayRemotes:FindFirstChild("RoundEndFade") or gameplayRemotes:FindFirstChild("RoundEnd"))
     local CoinCollected = gameplayRemotes and gameplayRemotes:FindFirstChild("CoinCollected")
 
-    -- ESCUCHA DE ROLES EN PlayerDataChanged
     if PlayerDataChanged then
         table.insert(connections, PlayerDataChanged.OnClientEvent:Connect(function(dataData)
             if typeof(dataData) == "table" and LocalPlayer then
@@ -763,7 +1838,6 @@ pcall(function()
                         myDeadState = myData["Dead"]
                     end
 
-                    -- Si acabamos de morir según el servidor, congelar inmediatamente el farm
                     if myDeadState == true then
                         roundInService = false
                         toggleNoclip(false)
@@ -835,7 +1909,7 @@ end
 if LocalPlayer.Character then setupCharacter(LocalPlayer.Character) end
 table.insert(connections, LocalPlayer.CharacterAdded:Connect(setupCharacter))
 
--- LOOP PRINCIPAL DE AUTO FARM (PERFECTAMENTE CONTROLADO POR ROL)
+-- MAIN AUTOFARM LOOP
 local function startFarmLoop()
     if farmThread then return end
     
@@ -945,7 +2019,9 @@ TabAutoFarm:CreateToggle("Farm_ResetFull", "Auto Reset", function(state)
     autoResetEnabled = state
 end)
 
-TabAutoFarm:CreateSlider("Farm_Speed", "Farm Speed", 15, 35, function(value)
+TabAutoFarm:CreateParagraph("⚠️ WARNING", "It is recommended to have a low auto farm speed value as it can kick you out of the game for invalid position.")
+
+TabAutoFarm:CreateSlider("Farm_Speed", "Farm Speed", 15, 30, function(value)
     farmSpeed = value
 end)
 
@@ -969,7 +2045,7 @@ TabAutoFarm:CreateToggle("Farm_AntiAFK", "Anti-AFK", function(state)
 end)
 
 --------------------------------------------------------------------------------
--- CLEANUP TASK
+-- CLEANUP TASK (INTEGRATED TO UNLOAD)
 --------------------------------------------------------------------------------
 KillerHub:AddTask(function()
     CleanUpPerfOverlay()
@@ -1004,794 +2080,6 @@ KillerHub:AddTask(function()
 end)
 
 -- Notification
-KillerHub:NotifySuccess("Killer Hub", "script working correctly", 3)
+KillerHub:NotifySuccess("Killer Hub", "Positions Persistence Solved & Fully Optimized!", 3)
 
---==============================================================================
--- 🔪 MM2 ADVANCED UTILITIES & BOMB JUMP — KILLER HUB
---==============================================================================
-
--- Cargar librería con fallback seguro (Loadstring del archivo Player)
-
-
-if not KillerHub then
-    warn("[KillerHub Error]: No se pudo obtener la interfaz base.")
-    return
-end
-
--- Prevenir doble ejecución
-if getgenv().__MM2CombinedScript_Loaded then
-    KillerHub:NotifyWarn("Alerta", "El script ya se está ejecutando.", 3)
-    return
-end
-getgenv().__MM2CombinedScript_Loaded = true
-
--- Servicios (Locales para acceso ultrarrápido)
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local CoreGui = game:GetService("CoreGui")
-local HttpService = game:GetService("HttpService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local LocalPlayer = Players.LocalPlayer
-
--- Helper para consultar flags de forma segura
-local function GetFlag(name, default)
-    local f = KillerHub.Flags and KillerHub.Flags[name]
-    if f == nil or f.CurrentValue == nil then return default end
-    return f.CurrentValue
-end
-
---==============================================================================
--- 📊 VARIABLES GLOBAL Y CONFIGURACIÓN BOMB JUMP
---==============================================================================
-local POTENCIA_SALTO = 58
-local UMBRAL_ARRASTRE = 8
-
--- Normal Bomb
-local CooldownNormalTime = 22.0
-local CooldownFinNormal = 0
-local NormalActivo = false
-local AutoEquipNormalActivo = false
-local LockNormal = false
-local BotonSizeNormalActual = 100
-local ARCHIVO_POS_NORMAL = "KillerHub_NormalPosConfig.json"
-
--- Gold Bomb
-local CooldownGoldTime = 3.0
-local CooldownFinGold = 0
-local GoldActivo = false
-local AutoEquipGoldActivo = false
-local LockGold = false
-local BotonSizeGoldActual = 100
-local ARCHIVO_POS_GOLD = "KillerHub_GoldPosConfig.json"
-
--- Diamond Bomb
-local CooldownDiamondTime = 5.5
-local CooldownFinDiamond = 0
-local DiamondActivo = false
-local AutoEquipDiamondActivo = false
-local LockDiamond = false
-local BotonSizeDiamondActual = 100
-local ARCHIVO_POS_DIAMOND = "KillerHub_DiamondPosConfig.json"
-
--- UI Flotantes y Conexiones
-local ScreenGuiNormal, BotonNormal
-local ScreenGuiGold, BotonGold
-local ScreenGuiDiamond, BotonDiamond
-local ID_Generacion_Actual = 0
-
-local DragConnections = { Normal = {}, Gold = {}, Diamond = {} }
-
--- Variables de Estado Player
-local NoclipConnection = nil
-local InvisConnection = nil
-local AntiFlingConnection = nil
-local invisParts = {}
-local speedGlitchLooping = false
-
--- Constante reutilizable para evitar recolección de basura
-local VECTOR3_ZERO = Vector3.zero
-
---==============================================================================
--- 💾 SISTEMA DE CONFIGURACIÓN BOMB JUMP
---==============================================================================
-local function guardarPosicionBoton(archivo, xScale, xOffset, yScale, yOffset)
-    if not writefile then return end
-    pcall(writefile, archivo, HttpService:JSONEncode({
-        X_Scale = xScale, X_Offset = xOffset, Y_Scale = yScale, Y_Offset = yOffset
-    }))
-end
-
-local function cargarPosicionBoton(archivo, defX, defY)
-    local pos = {ScaleX = defX, OffsetX = -50, ScaleY = defY, OffsetY = -50}
-    if readfile and isfile and isfile(archivo) then
-        pcall(function()
-            local decoded = HttpService:JSONDecode(readfile(archivo))
-            if decoded then
-                pos.ScaleX = decoded.X_Scale or pos.ScaleX
-                pos.OffsetX = decoded.X_Offset or pos.OffsetX
-                pos.ScaleY = decoded.Y_Scale or pos.ScaleY
-                pos.OffsetY = decoded.Y_Offset or pos.OffsetY
-            end
-        end)
-    end
-    return pos
-end
-
--- Estilo Liquid Glass
-local function AplicarEstiloLiquidGlass(boton, colorBordeText)
-    boton.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    boton.BackgroundTransparency = 0.35
-    boton.Font = Enum.Font.GothamBlack
-    boton.TextSize = 12
-    boton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    boton.TextStrokeTransparency = 1
-    boton.BorderSizePixel = 0
-    boton.Active = true
-
-    local corner = boton:FindFirstChildOfClass("UICorner") or Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 18)
-    corner.Parent = boton
-
-    local stroke = boton:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke")
-    stroke.Thickness = 1.5
-    stroke.Color = colorBordeText
-    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    stroke.Parent = boton
-end
-
--- Limpieza estricta de eventos para prevenir memory leaks / lag de FPS
-local function LimpiarConexionesDrag(tipo)
-    if DragConnections[tipo] then
-        for i = 1, #DragConnections[tipo] do
-            local conn = DragConnections[tipo][i]
-            if conn and conn.Connected then conn:Disconnect() end
-        end
-        table.clear(DragConnections[tipo])
-    end
-end
-
-local function ConfigurarArrastreYClick(boton, archivoConfig, getLockState, accionClick, tipoKey)
-    LimpiarConexionesDrag(tipoKey)
-
-    local dragging = false
-    local wasDragged = false
-    local dragInputObject = nil
-    local dragStart = VECTOR3_ZERO
-    local startPos = UDim2.new()
-
-    local connBegan = boton.InputBegan:Connect(function(input)
-        if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
-            dragging = true
-            wasDragged = false
-            dragInputObject = input
-            dragStart = input.Position
-            startPos = boton.Position
-        end
-    end)
-
-    local connChanged = UserInputService.InputChanged:Connect(function(input)
-        if dragging and input == dragInputObject then
-            local delta = input.Position - dragStart
-            if delta.Magnitude > UMBRAL_ARRASTRE then
-                wasDragged = true
-                if not (getLockState and getLockState()) then
-                    boton.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-                end
-            end
-        end
-    end)
-
-    local connEnded = UserInputService.InputEnded:Connect(function(input)
-        if input == dragInputObject and dragging then
-            dragging = false
-            dragInputObject = nil
-
-            if wasDragged then
-                if not (getLockState and getLockState()) then
-                    guardarPosicionBoton(archivoConfig, boton.Position.X.Scale, boton.Position.X.Offset, boton.Position.Y.Scale, boton.Position.Y.Offset)
-                end
-            else
-                if accionClick then accionClick() end
-            end
-        end
-    end)
-
-    table.insert(DragConnections[tipoKey], connBegan)
-    table.insert(DragConnections[tipoKey], connChanged)
-    table.insert(DragConnections[tipoKey], connEnded)
-end
-
--- Loop de cooldowns
-local function IniciarLoopCooldown(boton, tiempoFin, textoBase, colorBase, idGen)
-    task.spawn(function()
-        while os.clock() < tiempoFin and idGen == ID_Generacion_Actual do
-            if boton and boton.Parent then
-                local restante = tiempoFin - os.clock()
-                boton.Text = string.format("%.1fs", math.max(0, restante))
-                boton.TextColor3 = Color3.fromRGB(160, 160, 160)
-            else
-                break
-            end
-            task.wait(0.1)
-        end
-        if boton and boton.Parent and idGen == ID_Generacion_Actual then
-            boton.Text = textoBase
-            boton.TextColor3 = Color3.fromRGB(255, 255, 255)
-        end
-    end)
-end
-
---==============================================================================
--- 📦 LÓGICA BOMB JUMP (INVENTARIO Y EJECUCIÓN)
---==============================================================================
-local function ObtenerOVerificarBombaEnInventario(nombreBomba)
-    local char = LocalPlayer.Character
-    local backpack = LocalPlayer:FindFirstChild("Backpack")
-    if not char or not backpack then return nil end
-
-    local bomba = char:FindFirstChild(nombreBomba) or backpack:FindFirstChild(nombreBomba)
-    if bomba then return bomba end
-
-    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-    local extras = remotes and remotes:FindFirstChild("Extras")
-    local remoteToy = extras and extras:FindFirstChild("ReplicateToy")
-
-    if remoteToy then
-        pcall(function() remoteToy:InvokeServer(nombreBomba) end)
-    end
-
-    return nil
-end
-
--- Bucle pasivo optimizado para AutoEquip
-task.spawn(function()
-    while true do
-        task.wait(0.5)
-        if AutoEquipNormalActivo or AutoEquipGoldActivo or AutoEquipDiamondActivo then
-            local char = LocalPlayer.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            
-            if hum and hum.Health > 0 then
-                if AutoEquipNormalActivo and NormalActivo then ObtenerOVerificarBombaEnInventario("FakeBomb") end
-                if AutoEquipGoldActivo and GoldActivo then ObtenerOVerificarBombaEnInventario("GoldBomb") end
-                if AutoEquipDiamondActivo and DiamondActivo then ObtenerOVerificarBombaEnInventario("DiamondBomb") end
-            end
-        end
-    end
-end)
-
-local function PrepararBombaParaSalto(nombreBomba, autoEquip)
-    local char = LocalPlayer.Character
-    local backpack = LocalPlayer:FindFirstChild("Backpack")
-    if not char or not backpack then return nil end
-
-    local bomba = char:FindFirstChild(nombreBomba)
-    if bomba then return bomba end
-
-    bomba = backpack:FindFirstChild(nombreBomba)
-    if not bomba and autoEquip then
-        bomba = ObtenerOVerificarBombaEnInventario(nombreBomba)
-    end
-
-    if bomba and bomba.Parent == backpack then
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if hum then hum:EquipTool(bomba) end
-    end
-
-    return bomba
-end
-
-local function EjecutarBombJumpGenerico(bombaNombre, cooldownTime, refCooldownFin, refActivo, autoEquip, boton, textoBase, colorBase)
-    if os.clock() < refCooldownFin or not refActivo then return refCooldownFin end
-    
-    local char = LocalPlayer.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not (hum and root and hum.Health > 0) then return refCooldownFin end
-
-    local bomba = PrepararBombaParaSalto(bombaNombre, autoEquip)
-    if not bomba then return refCooldownFin end
-
-    local remote = bomba:FindFirstChild("Remote") or bomba:FindFirstChildWhichIsA("RemoteEvent", true)
-    if remote then
-        local nuevoCooldown = os.clock() + cooldownTime
-        IniciarLoopCooldown(boton, nuevoCooldown, textoBase, colorBase, ID_Generacion_Actual)
-
-        task.spawn(function()
-            -- 1. PRIMERO: Tirar / Soltar Bomba
-            pcall(function()
-                if bomba:FindFirstChild("Activate") then bomba:Activate() end
-                remote:FireServer(CFrame.new(root.Position - Vector3.new(0, 3, 0)), 50)
-            end)
-            
-            -- 2. MICRO-PAUSA DE SINCRONIZACIÓN (0.09s)
-            task.wait(0.09)
-            
-            -- 3. SEGUNDO: Aplicar Salto
-            if char and root and root.Parent and hum.Health > 0 then
-                local velActual = root.AssemblyLinearVelocity
-                root.AssemblyLinearVelocity = Vector3.new(velActual.X, POTENCIA_SALTO, velActual.Z)
-                hum:ChangeState(Enum.HumanoidStateType.Jumping)
-            end
-        end)
-        return nuevoCooldown
-    end
-    return refCooldownFin
-end
-
-local function EjecutarNormalBombJump()
-    CooldownFinNormal = EjecutarBombJumpGenerico("FakeBomb", CooldownNormalTime, CooldownFinNormal, NormalActivo, AutoEquipNormalActivo, BotonNormal, "BOMB JUMP", Color3.fromRGB(255, 255, 255))
-end
-
-local function EjecutarGoldBombJump()
-    CooldownFinGold = EjecutarBombJumpGenerico("GoldBomb", CooldownGoldTime, CooldownFinGold, GoldActivo, AutoEquipGoldActivo, BotonGold, "GOLD JUMP", Color3.fromRGB(255, 215, 0))
-end
-
-local function EjecutarDiamondBombJump()
-    CooldownFinDiamond = EjecutarBombJumpGenerico("DiamondBomb", CooldownDiamondTime, CooldownFinDiamond, DiamondActivo, AutoEquipDiamondActivo, BotonDiamond, "DIAMOND JUMP", Color3.fromRGB(0, 191, 255))
-end
-
---==============================================================================
--- 🔳 CREACIÓN DE BOTONES FLOTANTES
---==============================================================================
-local function CrearBotonNormal()
-    if CoreGui:FindFirstChild("KillerHub_NormalJump") then CoreGui.KillerHub_NormalJump:Destroy() end
-    ScreenGuiNormal = Instance.new("ScreenGui", CoreGui)
-    ScreenGuiNormal.Name = "KillerHub_NormalJump"
-    ScreenGuiNormal.ResetOnSpawn = false
-    
-    local pos = cargarPosicionBoton(ARCHIVO_POS_NORMAL, 0.6, 0.7)
-    BotonNormal = Instance.new("TextButton", ScreenGuiNormal)
-    BotonNormal.Name = "NormalJumpButton"
-    BotonNormal.Size = UDim2.new(0, BotonSizeNormalActual, 0, BotonSizeNormalActual)
-    BotonNormal.Position = UDim2.new(pos.ScaleX, pos.OffsetX, pos.ScaleY, pos.OffsetY)
-    
-    AplicarEstiloLiquidGlass(BotonNormal, Color3.fromRGB(255, 255, 255))
-    
-    if os.clock() < CooldownFinNormal then
-        IniciarLoopCooldown(BotonNormal, CooldownFinNormal, "BOMB JUMP", Color3.fromRGB(255, 255, 255), ID_Generacion_Actual)
-    else
-        BotonNormal.Text = "BOMB JUMP"
-    end
-    
-    ConfigurarArrastreYClick(BotonNormal, ARCHIVO_POS_NORMAL, function() return LockNormal end, EjecutarNormalBombJump, "Normal")
-end
-
-local function CrearBotonGold()
-    if CoreGui:FindFirstChild("KillerHub_GoldJump") then CoreGui.KillerHub_GoldJump:Destroy() end
-    ScreenGuiGold = Instance.new("ScreenGui", CoreGui)
-    ScreenGuiGold.Name = "KillerHub_GoldJump"
-    ScreenGuiGold.ResetOnSpawn = false
-    
-    local pos = cargarPosicionBoton(ARCHIVO_POS_GOLD, 0.4, 0.7)
-    BotonGold = Instance.new("TextButton", ScreenGuiGold)
-    BotonGold.Name = "GoldJumpButton"
-    BotonGold.Size = UDim2.new(0, BotonSizeGoldActual, 0, BotonSizeGoldActual)
-    BotonGold.Position = UDim2.new(pos.ScaleX, pos.OffsetX, pos.ScaleY, pos.OffsetY)
-    
-    AplicarEstiloLiquidGlass(BotonGold, Color3.fromRGB(255, 215, 0))
-    
-    if os.clock() < CooldownFinGold then
-        IniciarLoopCooldown(BotonGold, CooldownFinGold, "GOLD JUMP", Color3.fromRGB(255, 215, 0), ID_Generacion_Actual)
-    else
-        BotonGold.Text = "GOLD JUMP"
-    end
-    
-    ConfigurarArrastreYClick(BotonGold, ARCHIVO_POS_GOLD, function() return LockGold end, EjecutarGoldBombJump, "Gold")
-end
-
-local function CrearBotonDiamond()
-    if CoreGui:FindFirstChild("KillerHub_DiamondJump") then CoreGui.KillerHub_DiamondJump:Destroy() end
-    ScreenGuiDiamond = Instance.new("ScreenGui", CoreGui)
-    ScreenGuiDiamond.Name = "KillerHub_DiamondJump"
-    ScreenGuiDiamond.ResetOnSpawn = false
-    
-    local pos = cargarPosicionBoton(ARCHIVO_POS_DIAMOND, 0.5, 0.7)
-    BotonDiamond = Instance.new("TextButton", ScreenGuiDiamond)
-    BotonDiamond.Name = "DiamondJumpButton"
-    BotonDiamond.Size = UDim2.new(0, BotonSizeDiamondActual, 0, BotonSizeDiamondActual)
-    BotonDiamond.Position = UDim2.new(pos.ScaleX, pos.OffsetX, pos.ScaleY, pos.OffsetY)
-    
-    AplicarEstiloLiquidGlass(BotonDiamond, Color3.fromRGB(0, 191, 255))
-    
-    if os.clock() < CooldownFinDiamond then
-        IniciarLoopCooldown(BotonDiamond, CooldownFinDiamond, "DIAMOND JUMP", Color3.fromRGB(0, 191, 255), ID_Generacion_Actual)
-    else
-        BotonDiamond.Text = "DIAMOND JUMP"
-    end
-    
-    ConfigurarArrastreYClick(BotonDiamond, ARCHIVO_POS_DIAMOND, function() return LockDiamond end, EjecutarDiamondBombJump, "Diamond")
-end
-
-local function DestruirBotonNormal() 
-    LimpiarConexionesDrag("Normal")
-    if ScreenGuiNormal then ScreenGuiNormal:Destroy() ScreenGuiNormal = nil BotonNormal = nil end 
-end
-local function DestruirBotonGold() 
-    LimpiarConexionesDrag("Gold")
-    if ScreenGuiGold then ScreenGuiGold:Destroy() ScreenGuiGold = nil BotonGold = nil end 
-end
-local function DestruirBotonDiamond() 
-    LimpiarConexionesDrag("Diamond")
-    if ScreenGuiDiamond then ScreenGuiDiamond:Destroy() ScreenGuiDiamond = nil BotonDiamond = nil end 
-end
-
---==============================================================================
--- ⚡ CORE UTILITY FUNCTIONS (PLAYER)
---==============================================================================
-
--- Speed Glitch Optimizado
-local function startSpeedGlitchLoop()
-    if speedGlitchLooping then return end
-    speedGlitchLooping = true
-    
-    task.spawn(function()
-        local wallCheckParams = RaycastParams.new()
-        wallCheckParams.FilterType = Enum.RaycastFilterType.Exclude
-        wallCheckParams.IgnoreWater = true
-        
-        while GetFlag("Speed_Glitch", false) do
-            local char = LocalPlayer.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            local root = char and char:FindFirstChild("HumanoidRootPart")
-            
-            if hum and root and hum.Health > 0 then
-                local currentHandState = hum:GetState()
-                local isClimbing = (currentHandState == Enum.HumanoidStateType.Climbing)
-                local isSwimming = (currentHandState == Enum.HumanoidStateType.Swimming)
-                
-                if hum.FloorMaterial == Enum.Material.Air and root.AssemblyLinearVelocity.Y > 0 and not isClimbing and not isSwimming then
-                    local moveDir = hum.MoveDirection
-                    if moveDir.Magnitude > 0 then
-                        wallCheckParams.FilterDescendantsInstances = {char, workspace.CurrentCamera}
-                        local raycastResult = workspace:Raycast(root.Position, moveDir * 2.2, wallCheckParams)
-                        
-                        if not raycastResult then
-                            local power = GetFlag("Speed_Glitch_Intensity", 50)
-                            root.AssemblyLinearVelocity = Vector3.new(
-                                moveDir.X * power,
-                                root.AssemblyLinearVelocity.Y,
-                                moveDir.Z * power
-                            )
-                        end
-                    end
-                end
-            end
-            RunService.Heartbeat:Wait()
-        end
-        speedGlitchLooping = false
-    end)
-end
-
--- Método FE Invisibility con Transparencia 0.5 y desincronización
-local function ToggleInvisibilityFE(state)
-    if InvisConnection then
-        InvisConnection:Disconnect()
-        InvisConnection = nil
-    end
-
-    local char = LocalPlayer.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    
-    if not state then
-        for part, origTrans in pairs(invisParts) do
-            if part and part.Parent then
-                part.Transparency = origTrans
-            end
-        end
-        table.clear(invisParts)
-
-        if hum then hum.CameraOffset = VECTOR3_ZERO end
-        return
-    end
-
-    if not char or not hum then return end
-
-    table.clear(invisParts)
-    local descendants = char:GetDescendants()
-    for i = 1, #descendants do
-        local obj = descendants[i]
-        if obj:IsA("BasePart") and obj.Name ~= "HumanoidRootPart" then
-            invisParts[obj] = obj.Transparency
-            obj.Transparency = 0.5
-        end
-    end
-
-    InvisConnection = RunService.Heartbeat:Connect(function()
-        local character = LocalPlayer.Character
-        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-        local rootPart = character and character:FindFirstChild("HumanoidRootPart")
-
-        if humanoid and rootPart and humanoid.Health > 0 and GetFlag("Invisible_FE", false) then
-            local cf = rootPart.CFrame
-            local camOffset = humanoid.CameraOffset
-            local hidden = cf * CFrame.new(0, -200000, 0)
-
-            rootPart.CFrame = hidden
-            humanoid.CameraOffset = hidden:ToObjectSpace(CFrame.new(cf.Position)).Position
-
-            RunService.RenderStepped:Wait()
-
-            if rootPart and rootPart.Parent then rootPart.CFrame = cf end
-            if humanoid and humanoid.Parent then humanoid.CameraOffset = camOffset end
-        end
-    end)
-end
-
--- Módulo Anti Fling Altamente Optimizado
-local function ToggleAntiFling(state)
-    if AntiFlingConnection then
-        AntiFlingConnection:Disconnect()
-        AntiFlingConnection = nil
-    end
-
-    if not state then return end
-
-    AntiFlingConnection = RunService.Stepped:Connect(function()
-        if not GetFlag("Anti_Fling", false) then return end
-
-        local allPlayers = Players:GetPlayers()
-        for i = 1, #allPlayers do
-            local player = allPlayers[i]
-            if player ~= LocalPlayer and player.Character then
-                local parts = player.Character:GetDescendants()
-                for j = 1, #parts do
-                    local part = parts[j]
-                    if part:IsA("BasePart") then
-                        if part.CanCollide then part.CanCollide = false end
-                        if part.AssemblyLinearVelocity.Magnitude > 50 or part.AssemblyAngularVelocity.Magnitude > 50 then
-                            part.AssemblyLinearVelocity = VECTOR3_ZERO
-                            part.AssemblyAngularVelocity = VECTOR3_ZERO
-                        end
-                    end
-                end
-            end
-        end
-
-        local wsObjects = workspace:GetChildren()
-        for i = 1, #wsObjects do
-            local obj = wsObjects[i]
-            if obj:IsA("Accessory") then
-                local handle = obj:FindFirstChildWhichIsA("BasePart")
-                if handle then
-                    if handle.CanCollide then handle.CanCollide = false end
-                    if handle.AssemblyLinearVelocity.Magnitude > 50 then
-                        handle.AssemblyLinearVelocity = VECTOR3_ZERO
-                        handle.AssemblyAngularVelocity = VECTOR3_ZERO
-                    end
-                end
-            end
-        end
-    end)
-end
-
---==============================================================================
--- 🔄 CHARACTER INITIALIZATION & PERSISTENCE
---==============================================================================
-local function SetupCharacter(char)
-    task.wait(0.3)
-    local humanoid = char:WaitForChild("Humanoid", 5)
-    if not humanoid then return end
-    
-    if GetFlag("Invisible_FE", false) then ToggleInvisibilityFE(true) end
-    if GetFlag("Anti_Fling", false) then ToggleAntiFling(true) end
-    
-    humanoid:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
-        if GetFlag("WalkSpeed_Toggle", false) then
-            local targetSpeed = GetFlag("WalkSpeed_Value", 16)
-            if humanoid.WalkSpeed ~= targetSpeed then humanoid.WalkSpeed = targetSpeed end
-        end
-    end)
-    
-    humanoid:GetPropertyChangedSignal("JumpPower"):Connect(function()
-        if GetFlag("JumpPower_Toggle", false) then
-            humanoid.UseJumpPower = true
-            local targetJump = GetFlag("JumpPower_Value", 50)
-            if humanoid.JumpPower ~= targetJump then humanoid.JumpPower = targetJump end
-        end
-    end)
-    
-    if GetFlag("WalkSpeed_Toggle", false) then humanoid.WalkSpeed = GetFlag("WalkSpeed_Value", 16) end
-    if GetFlag("JumpPower_Toggle", false) then 
-        humanoid.UseJumpPower = true 
-        humanoid.JumpPower = GetFlag("JumpPower_Value", 50) 
-    end
-end
-
-LocalPlayer.CharacterAdded:Connect(function(char)
-    -- Reset Detector de Bomb Jump
-    ID_Generacion_Actual = ID_Generacion_Actual + 1
-    CooldownFinNormal = 0
-    CooldownFinGold = 0
-    CooldownFinDiamond = 0
-    
-    if BotonNormal and NormalActivo then BotonNormal.Text = "BOMB JUMP" BotonNormal.TextColor3 = Color3.fromRGB(255, 255, 255) end
-    if BotonGold and GoldActivo then BotonGold.Text = "GOLD JUMP" BotonGold.TextColor3 = Color3.fromRGB(255, 255, 255) end
-    if BotonDiamond and DiamondActivo then BotonDiamond.Text = "DIAMOND JUMP" BotonDiamond.TextColor3 = Color3.fromRGB(255, 255, 255) end
-
-    -- Setup Character de Player
-    SetupCharacter(char)
-end)
-
-if LocalPlayer.Character then task.spawn(SetupCharacter, LocalPlayer.Character) end
-
---==============================================================================
--- 📌 1. INTERFACE SETUP (PESTAÑAS DE PLAYER PRIMERO)
---==============================================================================
-
-local TabPlayer = KillerHub:CreateTab("Player", "Movement")
-
--- Sección 1: Speed Glitch
-TabPlayer:CreateSection("Speed Glitch")
-
-TabPlayer:CreateToggle("Speed_Glitch", "Speed Glitch", function(state)
-    if state then startSpeedGlitchLoop() end
-end)
-
-TabPlayer:CreateSlider("Speed_Glitch_Intensity", "Speed Glitch Intensity", 1, 200, function(value) end)
-
--- Sección 2: Modificadores de Movimiento
-TabPlayer:CreateSection("Movement Modifiers")
-
-TabPlayer:CreateToggleSlider("WalkSpeed_Toggle", "WalkSpeed_Value", "WalkSpeed", 16, 120, 
-    function(state)
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if hum then hum.WalkSpeed = state and GetFlag("WalkSpeed_Value", 16) or 16 end
-    end,
-    function(value)
-        if not GetFlag("WalkSpeed_Toggle", false) then return end
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if hum then hum.WalkSpeed = value end
-    end
-)
-
-TabPlayer:CreateToggleSlider("JumpPower_Toggle", "JumpPower_Value", "JumpPower", 50, 150, 
-    function(state)
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if hum then 
-            hum.UseJumpPower = true
-            hum.JumpPower = state and GetFlag("JumpPower_Value", 50) or 50 
-        end
-    end,
-    function(value)
-        if not GetFlag("JumpPower_Toggle", false) then return end
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if hum then 
-            hum.UseJumpPower = true
-            hum.JumpPower = value 
-        end
-    end
-)
-
--- Sección 3: Utilidades
-TabPlayer:CreateSection("Utilities")
-
--- Infinite Jump
-UserInputService.JumpRequest:Connect(function()
-    if GetFlag("Infinite_Jump", false) and LocalPlayer.Character then
-        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-        if humanoid and humanoid.Health > 0 then 
-            humanoid:ChangeState(Enum.HumanoidStateType.Jumping) 
-        end
-    end
-end)
-
-TabPlayer:CreateToggle("Infinite_Jump", "Infinite Jump", function(state) end)
-
--- Noclip Limpio
-TabPlayer:CreateToggle("Noclip", "Noclip", function(state)
-    if state then
-        NoclipConnection = RunService.Stepped:Connect(function()
-            local char = LocalPlayer.Character
-            if char and char:IsDescendantOf(workspace) then
-                local parts = char:GetDescendants()
-                for i = 1, #parts do
-                    local part = parts[i]
-                    if part:IsA("BasePart") and part.CanCollide then
-                        part.CanCollide = false
-                    end
-                end
-            end
-        end)
-    else
-        if NoclipConnection then 
-            NoclipConnection:Disconnect() 
-            NoclipConnection = nil 
-        end
-    end
-end)
-
--- Invisible FE
-TabPlayer:CreateToggle("Invisible_FE", "Invisible FE", function(state)
-    ToggleInvisibilityFE(state)
-end)
-
--- Anti Fling
-TabPlayer:CreateToggle("Anti_Fling", "Anti Fling", function(state)
-    ToggleAntiFling(state)
-end)
-
---==============================================================================
--- 📌 2. INTERFACE SETUP (PESTAÑA DE BOMB JUMP DESPUÉS)
---==============================================================================
-
-local MMVTab = KillerHub:CreateTab("Bomb Jump", "rbxassetid://14321074389")
-
--- 1️⃣ NORMAL BOMB JUMP
-MMVTab:CreateSection("Bomb Jump")
-
-MMVTab:CreateToggle("NormalBomb_Enable", "Bomb Jump", function(estado)
-    NormalActivo = estado
-    if estado then CrearBotonNormal() else DestruirBotonNormal() end
-end)
-
-MMVTab:CreateSlider("NormalBomb_Size", "Button Size", 60, 200, function(valor)
-    BotonSizeNormalActual = math.floor(valor)
-    if BotonNormal and NormalActivo then
-        BotonNormal.Size = UDim2.new(0, BotonSizeNormalActual, 0, BotonSizeNormalActual)
-    end
-end)
-
-MMVTab:CreateToggle("NormalBomb_Lock", "Lock Position", function(estado)
-    LockNormal = estado
-end)
-
-MMVTab:CreateToggle("NormalBomb_AutoEquip", "Auto Equip", function(estado)
-    AutoEquipNormalActivo = estado
-end)
-
--- 2️⃣ GOLD BOMB JUMP
-MMVTab:CreateSection("Gold Bomb Jump")
-
-MMVTab:CreateToggle("GoldBomb_Enable", "Gold Bomb Jump", function(estado)
-    GoldActivo = estado
-    if estado then CrearBotonGold() else DestruirBotonGold() end
-end)
-
-MMVTab:CreateSlider("GoldBomb_Size", "Button Size", 60, 200, function(valor)
-    BotonSizeGoldActual = math.floor(valor)
-    if BotonGold and GoldActivo then
-        BotonGold.Size = UDim2.new(0, BotonSizeGoldActual, 0, BotonSizeGoldActual)
-    end
-end)
-
-MMVTab:CreateToggle("GoldBomb_Lock", "Lock Position", function(estado)
-    LockGold = estado
-end)
-
-MMVTab:CreateToggle("GoldBomb_AutoEquip", "Auto Equip", function(estado)
-    AutoEquipGoldActivo = estado
-end)
-
--- 3️⃣ DIAMOND BOMB JUMP
-MMVTab:CreateSection("Diamond Bomb Jump")
-
-MMVTab:CreateToggle("DiamondBomb_Enable", "Diamond Bomb Jump", function(estado)
-    DiamondActivo = estado
-    if estado then CrearBotonDiamond() else DestruirBotonDiamond() end
-end)
-
-MMVTab:CreateSlider("DiamondBomb_Size", "Button Size", 60, 200, function(valor)
-    BotonSizeDiamondActual = math.floor(valor)
-    if BotonDiamond and DiamondActivo then
-        BotonDiamond.Size = UDim2.new(0, BotonSizeDiamondActual, 0, BotonSizeDiamondActual)
-    end
-end)
-
-MMVTab:CreateToggle("DiamondBomb_Lock", "Lock Position", function(estado)
-    LockDiamond = estado
-end)
-
-MMVTab:CreateToggle("DiamondBomb_AutoEquip", "Auto Equip", function(estado)
-    AutoEquipDiamondActivo = estado
-end)
-
--- Notificación Final de Carga Exitosa
-KillerHub:NotifySuccess("MM2 Script", "Script unificado y cargado con éxito.", 4)
-
-return KillerHub
+return killerHub
