@@ -1,5 +1,5 @@
 -- ============================================================================
--- 👻 KILLER HUB | MURDER SUITE V9.3 (SMART RESOURCE SAVER & VISUAL FIX)
+-- 👻 KILLER HUB | MURDER SUITE V9.5 (RESTORED V9.3 STAB HITBOX METHOD)
 -- ============================================================================
 
 if getgenv().__KillerHub_MurderSuite_Loaded then
@@ -429,6 +429,64 @@ MurderTab:CreateSlider("KnifeThrowDistance", "Throw Advance Distance", 0, 100, f
 MurderTab:CreateSlider("KnifeHorizSlider", "Horizontal prediction", 0, 300, function(value) end)
 MurderTab:CreateSlider("KnifeVertSlider", "Vertical prediction", 0, 120, function(value) end)
 
+MurderTab:CreateButton("Kill all", function()
+    local char = LocalPlayer.Character
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    local knife = (char and char:FindFirstChild("Knife")) or (backpack and backpack:FindFirstChild("Knife"))
+
+    if not knife then
+        KillerHub:NotifyWarn("Kill All", "Necesitas tener el Cuchillo en el inventario o equipado.", 3)
+        return
+    end
+
+    if knife.Parent ~= char then
+        knife.Parent = char
+        task.wait(0.05)
+    end
+
+    local events = knife:FindFirstChild("Events")
+    local localHrp = char and char:FindFirstChild("HumanoidRootPart")
+
+    if not events then
+        KillerHub:NotifyError("Kill All", "No se encontraron los eventos del cuchillo.", 3)
+        return
+    end
+
+    local knifeThrown = events:FindFirstChild("KnifeThrown")
+    local knifeStabbed = events:FindFirstChild("KnifeStabbed")
+    local handleTouched = events:FindFirstChild("HandleTouched")
+
+    local killedCount = 0
+    local allPlayers = Players:GetPlayers()
+
+    for i = 1, #allPlayers do
+        local player = allPlayers[i]
+        if player ~= LocalPlayer and player.Character then
+            local targetHrp = player.Character:FindFirstChild("HumanoidRootPart")
+            local targetHum = player.Character:FindFirstChildOfClass("Humanoid")
+
+            if targetHrp and targetHum and targetHum.Health > 0 then
+                killedCount = killedCount + 1
+
+                if knifeStabbed and handleTouched then
+                    knifeStabbed:FireServer()
+                    handleTouched:FireServer(targetHrp)
+                end
+
+                if knifeThrown and localHrp then
+                    knifeThrown:FireServer(localHrp.CFrame, targetHrp.CFrame)
+                end
+            end
+        end
+    end
+
+    if killedCount > 0 then
+        KillerHub:NotifySuccess("Kill All", "Ejecutado con éxito en " .. tostring(killedCount) .. " jugadores.", 3)
+    else
+        KillerHub:NotifyInfo("Kill All", "No hay jugadores vivos para eliminar.", 3)
+    end
+end)
+
 MurderTab:CreateSection("Stab Hitbox Modifier")
 MurderTab:CreateToggle("StabHitboxMaster", "Stab Hitbox", function(state) end)
 MurderTab:CreateToggle("SeeHitboxActive", "See hitbox", function(state) end)
@@ -456,7 +514,6 @@ local hbConn = RunService.Heartbeat:Connect(function()
     local smartVis = GetFlag("SmartHandVisibility", false)
     local hasKnife = hasKnifeInInventory()
 
-    -- Ahorrador de recursos: Si Smart Visibility está activado y NO hay cuchillo, pausamos cálculos de aimbot
     local shouldRunAimLogic = silentAimActive and (not smartVis or hasKnife)
 
     if shouldRunAimLogic then
@@ -499,7 +556,7 @@ local hbConn = RunService.Heartbeat:Connect(function()
             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
             
             if hrp then
-                -- Modificación de Hitbox con comprobación rápida
+                -- Modificación de Hitbox con comprobación rápida (MÉTODO V9.3 FIEL)
                 if hitboxActive then
                     local targetSize = Vector3.new(hitboxSize, hitboxSize, hitboxSize)
                     if hrp.Size ~= targetSize then hrp.Size = targetSize end
@@ -573,7 +630,6 @@ KillerHub:AddTask(hbConn)
 local rsConn = RunService.RenderStepped:Connect(function()
     local silentAimActive = GetFlag("KnifeAimActive", false)
 
-    -- Si apagas el Silent Aim, apaga todo inmediatamente
     if not silentAimActive then
         FOVCircle.Visible = false
         PredDotCenter.Visible = false
@@ -586,7 +642,6 @@ local rsConn = RunService.RenderStepped:Connect(function()
     local hasKnife = hasKnifeInInventory()
     local smartVis = GetFlag("SmartHandVisibility", false)
 
-    -- Ahorrador de recursos: Si Smart Visibility está encendido y no hay cuchillo, ocultar todo
     if smartVis and not hasKnife then
         FOVCircle.Visible = false
         PredDotCenter.Visible = false
@@ -610,7 +665,7 @@ local rsConn = RunService.RenderStepped:Connect(function()
 
     local activeTarget = cachedTarget
 
-    -- Standard Prediction Visuals (Circles & Connection Line)
+    -- Standard Prediction Visuals
     local showPred = GetFlag("ShowKnifePredictionVisual", false)
     if showPred and activeTarget and activeTarget.Character then
         local basePos, rawPredictedPos = getAdvancedKnifePrediction(activeTarget.Character)
@@ -657,12 +712,11 @@ local rsConn = RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- Prediction Tracer Visual (Morado Void desde Mano Derecha)
+    -- Prediction Tracer Visual
     local showTracer = GetFlag("ShowKnifeTracerVisual", false)
     if showTracer and activeTarget and activeTarget.Character then
         local _, rawPredictedPos = getAdvancedKnifePrediction(activeTarget.Character)
         if rawPredictedPos then
-            -- 80% reactividad / 20% suavizado en la respuesta
             lastTracerPosition = lastTracerPosition:Lerp(rawPredictedPos, 0.80)
 
             local char = LocalPlayer.Character
