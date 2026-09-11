@@ -1,5 +1,5 @@
 -- ============================================================================
--- 👻 KILLER HUB | MURDER SUITE V10.0 (SILENT KILL ALL & INSTANT THROWN)
+-- 👻 KILLER HUB | MURDER SUITE V9.7 (INSTANT STAB KILL ALL & FAST THROWN)
 -- ============================================================================
 
 if getgenv().__KillerHub_MurderSuite_Loaded then
@@ -12,7 +12,7 @@ getgenv().__KillerHub_MurderSuite_Loaded = true
 
 local KillerHub = loadstring(game:HttpGet("https://raw.githubusercontent.com/paoloskibidipro/noname/refs/heads/main/unknow.lua"))()
 
--- Servicios de Roblox
+-- Servicios
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -23,7 +23,7 @@ local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local Camera = workspace.CurrentCamera
 
--- Archivo de Persistencia de Posición del Botón
+-- Archivo de Persistencia de Posición
 local POS_FILE = "MurderSuite_ButtonPos.json"
 
 local function saveButtonPosition(pos)
@@ -51,7 +51,7 @@ local function loadButtonPosition()
     return UDim2.new(0.82, 0, 0.60, 0)
 end
 
--- Caché de Constantes y Memoria
+-- Constants & Memory Caches
 local MAX_DISTANCE_SQ = 1822500
 local wallFilterTable = {}
 local partsToCheck = {nil, nil}
@@ -64,10 +64,15 @@ local lastKnifeCheck = 0
 local cachedTarget = nil
 local wasHitboxActive = false
 
+-- GC Optimization: Limpiar física cuando los jugadores salen
+KillerHub:AddTask(Players.PlayerRemoving:Connect(function(player)
+    playerFysics[player] = nil
+end))
+
 local raycastParams = RaycastParams.new()
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 
--- Caché de Viewport y DPI Scale
+-- Caché de Viewport y DPI
 local cachedViewportSize = Camera.ViewportSize
 local cachedScreenCenter = Vector2.new(cachedViewportSize.X / 2, cachedViewportSize.Y / 2)
 local cachedDpiScale = 1
@@ -102,7 +107,7 @@ local TracerLine = Drawing.new("Line")
 TracerLine.Thickness = 1.0; TracerLine.Color = Color3.fromRGB(140, 0, 255); TracerLine.Transparency = 0.9; TracerLine.Visible = false
 KillerHub:AddTask(TracerLine)
 
--- Helper para Leer Flags
+-- Helper para leer Flags
 local function GetFlag(flagName, default)
     local f = KillerHub.Flags[flagName]
     if f == nil or f.CurrentValue == nil then return default end
@@ -119,7 +124,7 @@ local function getMaterialEnum(matString)
     return result
 end
 
--- Helpers de Armas
+-- Auxiliares del juego
 local function hasKnifeInInventory()
     local now = os.clock()
     if now - lastKnifeCheck > 0.15 then
@@ -146,7 +151,7 @@ local function checkPlayerHasGun(player)
     return backpack and backpack:FindFirstChild("Gun") ~= nil
 end
 
--- Wall Check Optimizado
+-- Wall Check optimizado
 local function isVisibleThroughWalls(targetChar)
     if not targetChar then return false end
     local localChar = LocalPlayer.Character
@@ -331,7 +336,7 @@ local function getClosestTargetToFOV()
     return closestInnocent
 end
 
--- Predicción Avanzada
+-- Motor de Predicción Balística
 local function getAdvancedKnifePrediction(targetChar)
     if not targetChar then return nil, nil end
     local hrp = targetChar:FindFirstChild("HumanoidRootPart")
@@ -470,7 +475,7 @@ local function getAdvancedKnifePrediction(targetChar)
     return targetPosition, finalPredictedPos
 end
 
--- LÓGICA DE LANZAMIENTO INSTANTÁNEO INDIVIDUAL
+-- LÓGICA DE LANZAMIENTO INSTANTÁNEO + FAST THROW
 local function executeInstantThrow()
     local knife = getKnifeTool()
     if not knife then return end
@@ -513,48 +518,67 @@ local function executeInstantThrow()
     knifeThrownRemote:FireServer(originCF, targetCF)
 end
 
--- ============================================================================
--- 🔥 LÓGICA KILL ALL INSTANTÁNEO (SIN MOVER TU PERSONAJE)
--- ============================================================================
-local function executeKillAll()
+-- LÓGICA DE KILL ALL SILENCIOSO (STAB) SIN TELETRANSPORTAR
+local function executeStabKillAll()
     local knife = getKnifeTool()
     if not knife then
-        if KillerHub and KillerHub.NotifyWarn then
-            KillerHub:NotifyWarn("Kill All Error", "Necesitas tener el cuchillo equipado o en el inventario.", 3)
-        end
+        KillerHub:NotifyWarn("Kill All", "No tienes el cuchillo equipado ni en el inventario.", 3)
         return
     end
 
+    local char = LocalPlayer.Character
+    if not char then return end
+
+    -- Auto-equipar el cuchillo si está en el Backpack
+    if knife.Parent ~= char then
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid:EquipTool(knife)
+            task.wait(0.08)
+        end
+    end
+
     local events = knife:FindFirstChild("Events")
-    local knifeThrownRemote = events and events:FindFirstChild("KnifeThrown")
-    if not knifeThrownRemote then return end
+    local knifeStabbed = events and events:FindFirstChild("KnifeStabbed")
+    local handleTouched = events and events:FindFirstChild("HandleTouched")
+
+    if not knifeStabbed or not handleTouched then
+        KillerHub:NotifyError("Kill All", "No se encontraron los remotos del cuchillo.", 3)
+        return
+    end
+
+    -- Iniciar la animación de puñalada en el servidor
+    knifeStabbed:FireServer()
 
     local allPlayers = Players:GetPlayers()
-    local killCount = 0
+    local killedCount = 0
 
+    -- Enviar instantáneamente el evento HandleTouched a todos los personajes sin moverse
     for i = 1, #allPlayers do
-        local target = allPlayers[i]
-        if target ~= LocalPlayer and target.Character then
-            local humanoid = target.Character:FindFirstChildOfClass("Humanoid")
-            local hrp = target.Character:FindFirstChild("HumanoidRootPart")
+        local player = allPlayers[i]
+        if player ~= LocalPlayer and player.Character then
+            local targetChar = player.Character
+            local hum = targetChar:FindFirstChildOfClass("Humanoid")
+            local targetPart = targetChar:FindFirstChild("HumanoidRootPart") 
+                or targetChar:FindFirstChild("UpperTorso") 
+                or targetChar:FindFirstChild("Torso") 
+                or targetChar:FindFirstChild("Head")
 
-            if humanoid and humanoid.Health > 0 and hrp then
-                -- Posiciona el CFrame origen del proyectil pegado al torso del objetivo
-                local targetCF = hrp.CFrame
-                local originCF = targetCF * CFrame.new(0, 0, 0.8) 
-                
-                knifeThrownRemote:FireServer(originCF, targetCF)
-                killCount = killCount + 1
+            if hum and hum.Health > 0 and targetPart then
+                handleTouched:FireServer(targetPart)
+                killedCount = killedCount + 1
             end
         end
     end
 
-    if KillerHub and KillerHub.NotifySuccess then
-        KillerHub:NotifySuccess("Kill All Executed", "Ataque instantáneo lanzado a " .. killCount .. " jugadores.", 3)
+    if killedCount > 0 then
+        KillerHub:NotifySuccess("Kill All", "Apuñalados " .. tostring(killedCount) .. " jugadores instantáneamente.", 3)
+    else
+        KillerHub:NotifyWarn("Kill All", "No hay otros jugadores vivos en la partida.", 3)
     end
 end
 
--- Creación del Botón Flotante (Thrown Button)
+-- CREACIÓN DEL BOTÓN FLOTANTE ESTILO SHERIFF SUITE
 local cachedScreenGui, cachedShootButton, checkWeaponVisibility
 
 local function setupThrownButtonGUI()
@@ -713,19 +737,8 @@ checkWeaponVisibility = function()
     end
 end
 
--- ============================================================================
--- 🎨 ESTRUCTURA DE INTERFAZ KILLER HUB
--- ============================================================================
+-- UI Setup (KillerHub MurderTab)
 local MurderTab = KillerHub:CreateTab("Murder", "rbxassetid://104386785713574")
-
-MurderTab:CreateSection("⚡ Instant Kill Suite")
-MurderTab:CreateButton("⚡ KILL ALL (Sin Moverse)", function()
-    executeKillAll()
-end)
-MurderTab:CreateKeybind("Murder_KillAllKey", "Kill All Keybind", Enum.KeyCode.K, function()
-    executeKillAll()
-end)
-MurderTab:CreateHint("Mata a todos los jugadores del servidor de forma instantánea sin mover la posición de tu personaje.")
 
 MurderTab:CreateSection("Knife Combats")
 MurderTab:CreateToggle("KnifeAimActive", "Knife Thrown aim", function(state) end)
@@ -738,6 +751,11 @@ MurderTab:CreateSlider("KnifeThrowDistance", "Throw Advance Distance", 0, 100, f
 
 MurderTab:CreateSlider("KnifeHorizSlider", "Horizontal prediction", 0, 300, function(value) end)
 MurderTab:CreateSlider("KnifeVertSlider", "Vertical prediction", 0, 120, function(value) end)
+
+-- BOTÓN "KILL ALL" AL FINAL DE KNIFE COMBATS
+MurderTab:CreateButton("Kill All", function()
+    executeStabKillAll()
+end)
 
 MurderTab:CreateSection("Interface & Thrown Button")
 MurderTab:CreateToggle("Murder_ShowButton", "Show Thrown Button (Blatant)", function() checkWeaponVisibility() end)
@@ -771,7 +789,7 @@ MurderTab:CreateSection("Modify FOV")
 MurderTab:CreateToggleColorPicker("FovVisibleMurder", "FovColorMurder", "Show FOV Circle", Color3.fromRGB(0, 255, 185), function(state) end, function(color) end)
 MurderTab:CreateSlider("FovRadiusMurder", "FOV Radius", 30, 600, function(value) end)
 
--- LOOPS Y RENDIMIENTO
+-- LOOPS OPTIMIZADOS
 local visCheckTask = task.spawn(function()
     while task.wait(0.2) do
         pcall(checkWeaponVisibility)
@@ -1048,7 +1066,7 @@ if ClientServices then
     end
 end
 
--- Hook Namecall
+-- Namecall hook
 local rawNamecall
 rawNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
     local method = getnamecallmethod()
@@ -1068,6 +1086,7 @@ rawNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
             if dist > 0 then
                 local lookDir = direction.Unit
                 local advanceDistance = math.min(throwDistConfig, dist * 0.75)
+                
                 args[1] = originCF + (lookDir * advanceDistance)
             end
             
@@ -1077,7 +1096,6 @@ rawNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
 
     return rawNamecall(self, ...)
 end))
-
 
 --==============================================================================
 -- KILLER HUB UI - COMBINED MODULE (FIXED POS PERSISTENCE & OPTIMIZED)
