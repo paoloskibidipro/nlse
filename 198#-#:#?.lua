@@ -1,5 +1,5 @@
 -- ============================================================================
--- 👻 KILLER HUB | MURDER SUITE V9.6 (CORREGIDO PARA SHERIFF SUITE + VISUAL HITBOX)
+-- 👻 KILLER HUB | MURDER SUITE V9.6 (FAST INSTANT THROWN & AUTO-SAVE POSITION)
 -- ============================================================================
 
 if getgenv().__KillerHub_MurderSuite_Loaded then
@@ -48,7 +48,7 @@ local function loadButtonPosition()
         end)
         if success and result then return result end
     end
-    return UDim2.new(0.82, 0, 0.60, 0)
+    return UDim2.new(0.82, 0, 0.60, 0) -- Posición por defecto
 end
 
 -- Constants & Memory Caches
@@ -126,7 +126,7 @@ local function hasKnifeInInventory()
         lastKnifeCheck = now
         local char = LocalPlayer.Character
         local backpack = LocalPlayer:FindFirstChild("Backpack")
-        cachedHasKnife = (char and char:FindFirstChild("Knife") ~= nil) or (backpack and backpack:FindFirstChild("Knife") ~= nil)
+        cachedHasKnife = (char and char:FindFirstChild("Knife")) or (backpack and backpack:FindFirstChild("Knife"))
     end
     return cachedHasKnife
 end
@@ -144,21 +144,6 @@ local function checkPlayerHasGun(player)
     if char and char:FindFirstChild("Gun") then return true end
     local backpack = player:FindFirstChild("Backpack")
     return backpack and backpack:FindFirstChild("Gun") ~= nil
-end
-
--- Limpieza de Adornos Visuales
-local function cleanupVisualHitboxes()
-    local allPlayers = Players:GetPlayers()
-    for i = 1, #allPlayers do
-        local player = allPlayers[i]
-        if player.Character then
-            local hrp = player.Character:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                local visPart = hrp:FindFirstChild("__VisualHitbox")
-                if visPart then visPart:Destroy() end
-            end
-        end
-    end
 end
 
 -- Wall Check optimizado
@@ -512,6 +497,7 @@ local function executeInstantThrow()
         targetCF = mouse and mouse.Hit or CFrame.new(Camera.CFrame.Position + (Camera.CFrame.LookVector * 100))
     end
 
+    -- Integración del modo FAST (Avanzar el origen del cuchillo)
     local throwType = GetFlag("KnifeThrowType", "Normal")
     local throwDistConfig = GetFlag("KnifeThrowDistance", 14)
 
@@ -525,6 +511,7 @@ local function executeInstantThrow()
         end
     end
 
+    -- Disparo instantáneo directo por RemoteEvent
     knifeThrownRemote:FireServer(originCF, targetCF)
 end
 
@@ -618,6 +605,7 @@ local function setupThrownButtonGUI()
     labelConstraint.MinTextSize = 8
     labelConstraint.Parent = label
 
+    -- Lógica de Arrastre + Auto Guardado
     local dragging = false
     local dragInput, dragStart, startPos
 
@@ -669,6 +657,7 @@ end
 
 setupThrownButtonGUI()
 
+-- Control de Smart Visibility para el botón
 checkWeaponVisibility = function()
     if not cachedScreenGui then return end
     local showBtn = GetFlag("Murder_ShowButton", false)
@@ -756,153 +745,101 @@ local hbConn = RunService.Heartbeat:Connect(function()
         cachedTarget = nil
     end
 
-    -- MANEJO DE HITBOX (REAL VS VISUAL)
-    if hitboxActive then
-        wasHitboxActive = true
-        local seeHitbox = GetFlag("SeeHitboxActive", false)
-        local hitboxSize = GetFlag("HitboxSizeSlider", 2)
-        local transSlider = GetFlag("HitboxTransparencySlider", 0)
-        local targetTransparency = math.clamp(transSlider, 0, 100) / 100
-        local matEnum = getMaterialEnum(GetFlag("HitboxMaterialDropdown", "Plastic"))
-        local targetSize = Vector3.new(hitboxSize, hitboxSize, hitboxSize)
+    if not hitboxActive and wasHitboxActive then
+        wasHitboxActive = false
         local allPlayers = Players:GetPlayers()
-
         for i = 1, #allPlayers do
             local player = allPlayers[i]
             if player ~= LocalPlayer and player.Character then
                 local hrp = player.Character:FindFirstChild("HumanoidRootPart")
                 if hrp then
-                    if hasKnife then
-                        -- MODO MURDERER: Expansión real para impactar apuñalamientos
-                        local visPart = hrp:FindFirstChild("__VisualHitbox")
-                        if visPart then visPart:Destroy() end
-
-                        if hrp.Size ~= targetSize then hrp.Size = targetSize end
-                        if hrp.CanCollide then hrp.CanCollide = false end
-                        pcall(function() hrp.CanQuery = false end)
-
-                        if seeHitbox then
-                            if hrp.Transparency ~= targetTransparency then hrp.Transparency = targetTransparency end
-                            if hrp.Material ~= matEnum then hrp.Material = matEnum end
-                        else
-                            if hrp.Transparency ~= 1 then hrp.Transparency = 1 end
-                        end
-                    else
-                        -- MODO NO-MURDERER (Sheriff / Inocente): HRP Real intacto + Adorno puramente Visual (0 interferencia)
-                        if hrp.Size ~= Vector3.new(2, 2, 1) then hrp.Size = Vector3.new(2, 2, 1) end
-                        if hrp.Transparency ~= 1 then hrp.Transparency = 1 end
-                        if hrp.Material ~= Enum.Material.Plastic then hrp.Material = Enum.Material.Plastic end
-                        pcall(function() hrp.CanQuery = true end)
-
-                        if seeHitbox then
-                            local visPart = hrp:FindFirstChild("__VisualHitbox")
-                            if not visPart then
-                                visPart = Instance.new("Part")
-                                visPart.Name = "__VisualHitbox"
-                                visPart.Anchored = false
-                                visPart.CanCollide = false
-                                visPart.CanTouch = false
-                                pcall(function() visPart.CanQuery = false end)
-                                visPart.Massless = true
-                                visPart.Color = hrp.Color
-                                
-                                local weld = Instance.new("WeldConstraint")
-                                weld.Part0 = hrp
-                                weld.Part1 = visPart
-                                weld.Parent = visPart
-                                
-                                visPart.CFrame = hrp.CFrame
-                                visPart.Parent = hrp
-                            end
-
-                            if visPart.Size ~= targetSize then visPart.Size = targetSize end
-                            if visPart.Transparency ~= targetTransparency then visPart.Transparency = targetTransparency end
-                            if visPart.Material ~= matEnum then visPart.Material = matEnum end
-                        else
-                            local visPart = hrp:FindFirstChild("__VisualHitbox")
-                            if visPart then visPart:Destroy() end
-                        end
-                    end
-                end
-            end
-        end
-    else
-        if wasHitboxActive then
-            wasHitboxActive = false
-            cleanupVisualHitboxes()
-            local allPlayers = Players:GetPlayers()
-            for i = 1, #allPlayers do
-                local player = allPlayers[i]
-                if player ~= LocalPlayer and player.Character then
-                    local hrp = player.Character:FindFirstChild("HumanoidRootPart")
-                    if hrp then
-                        hrp.Size = Vector3.new(2, 2, 1)
-                        hrp.Transparency = 1
-                        hrp.Material = Enum.Material.Plastic
-                        pcall(function() hrp.CanQuery = true end)
-                    end
+                    hrp.Size = Vector3.new(2, 2, 1)
+                    hrp.Transparency = 1
+                    hrp.Material = Enum.Material.Plastic
                 end
             end
         end
     end
 
-    if not shouldRunAimLogic then return end
+    if not shouldRunAimLogic and not hitboxActive then return end
+    if hitboxActive then wasHitboxActive = true end
 
     local currentTime = os.clock()
+    local seeHitbox = GetFlag("SeeHitboxActive", false)
+    local hitboxSize = GetFlag("HitboxSizeSlider", 2)
+    local transSlider = GetFlag("HitboxTransparencySlider", 0)
+    local targetTransparency = math.clamp(transSlider, 0, 100) / 100
+    local matEnum = getMaterialEnum(GetFlag("HitboxMaterialDropdown", "Plastic"))
+    local targetSize = Vector3.new(hitboxSize, hitboxSize, hitboxSize)
     local allPlayers = Players:GetPlayers()
 
     for i = 1, #allPlayers do
         local player = allPlayers[i]
         if player ~= LocalPlayer and player.Character then
             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+            
             if hrp then
-                local currentPos = hrp.Position
-                local physicsVelocity = hrp.AssemblyLinearVelocity
-                
-                if not playerFysics[player] then
-                    playerFysics[player] = { 
-                        LastPos = currentPos, 
-                        LastTime = currentTime, 
-                        SmoothedVelocity = physicsVelocity, 
-                        LastVelocity = physicsVelocity,
-                        LastRawVelocity = physicsVelocity,
-                        ConsecutiveSameVelocity = 0,
-                        IsLaggingOut = false
-                    }
-                else
-                    local data = playerFysics[player]
-                    local deltaTime = currentTime - data.LastTime
-                    
-                    if deltaTime > 0 then
-                        local positionalVelocity = (currentPos - data.LastPos) / deltaTime
-                        local realVelocity = Vector3.new(physicsVelocity.X, positionalVelocity.Y, physicsVelocity.Z)
-                        
-                        local diffVel = realVelocity - data.LastRawVelocity
-                        if data.LastRawVelocity and diffVel:Dot(diffVel) < 0.000001 then
-                            data.ConsecutiveSameVelocity = data.ConsecutiveSameVelocity + 1
-                        else
-                            data.ConsecutiveSameVelocity = 0
-                        end
-                        
-                        data.LastRawVelocity = realVelocity
-                        
-                        if data.ConsecutiveSameVelocity > 20 and realVelocity:Dot(realVelocity) > 1 then
-                            data.IsLaggingOut = true
-                            realVelocity = Vector3.new(0, 0, 0)
-                        else
-                            data.IsLaggingOut = false
-                        end
-                        
-                        if positionalVelocity:Dot(positionalVelocity) > 3025 then 
-                            realVelocity = Vector3.new(0, 0, 0) 
-                        end
-                        
-                        data.LastVelocity = data.SmoothedVelocity
-                        data.SmoothedVelocity = data.SmoothedVelocity:Lerp(realVelocity, 0.20)
+                if hitboxActive then
+                    if hrp.Size ~= targetSize then hrp.Size = targetSize end
+                    if hrp.CanCollide then hrp.CanCollide = false end
+
+                    if seeHitbox then
+                        if hrp.Transparency ~= targetTransparency then hrp.Transparency = targetTransparency end
+                        if hrp.Material ~= matEnum then hrp.Material = matEnum end
+                    else
+                        if hrp.Transparency ~= 1 then hrp.Transparency = 1 end
                     end
+                end
+
+                if shouldRunAimLogic then
+                    local currentPos = hrp.Position
+                    local physicsVelocity = hrp.AssemblyLinearVelocity
                     
-                    data.LastPos = currentPos
-                    data.LastTime = currentTime
+                    if not playerFysics[player] then
+                        playerFysics[player] = { 
+                            LastPos = currentPos, 
+                            LastTime = currentTime, 
+                            SmoothedVelocity = physicsVelocity, 
+                            LastVelocity = physicsVelocity,
+                            LastRawVelocity = physicsVelocity,
+                            ConsecutiveSameVelocity = 0,
+                            IsLaggingOut = false
+                        }
+                    else
+                        local data = playerFysics[player]
+                        local deltaTime = currentTime - data.LastTime
+                        
+                        if deltaTime > 0 then
+                            local positionalVelocity = (currentPos - data.LastPos) / deltaTime
+                            local realVelocity = Vector3.new(physicsVelocity.X, positionalVelocity.Y, physicsVelocity.Z)
+                            
+                            local diffVel = realVelocity - data.LastRawVelocity
+                            if data.LastRawVelocity and diffVel:Dot(diffVel) < 0.000001 then
+                                data.ConsecutiveSameVelocity = data.ConsecutiveSameVelocity + 1
+                            else
+                                data.ConsecutiveSameVelocity = 0
+                            end
+                            
+                            data.LastRawVelocity = realVelocity
+                            
+                            if data.ConsecutiveSameVelocity > 20 and realVelocity:Dot(realVelocity) > 1 then
+                                data.IsLaggingOut = true
+                                realVelocity = Vector3.new(0, 0, 0)
+                            else
+                                data.IsLaggingOut = false
+                            end
+                            
+                            if positionalVelocity:Dot(positionalVelocity) > 3025 then 
+                                realVelocity = Vector3.new(0, 0, 0) 
+                            end
+                            
+                            data.LastVelocity = data.SmoothedVelocity
+                            data.SmoothedVelocity = data.SmoothedVelocity:Lerp(realVelocity, 0.20)
+                        end
+                        
+                        data.LastPos = currentPos
+                        data.LastTime = currentTime
+                    end
                 end
             end
         end
@@ -2413,11 +2350,6 @@ KillerHub:AddTask(function()
 end)
 
 -- Notification
-if KillerHub.NotifySuccess then
-    KillerHub:NotifySuccess("Killer Hub", "Positions Persistence Solved & Fully Optimized!", 3)
-elseif KillerHub.NotifyWarn then
-    KillerHub:NotifyWarn("Killer Hub", "Positions Persistence Solved & Fully Optimized!", 3)
-end
+KillerHub:NotifySuccess("Killer Hub", "Positions Persistence Solved & Fully Optimized!", 3)
 
-return KillerHub
-
+return killerHub
