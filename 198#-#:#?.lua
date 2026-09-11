@@ -2416,6 +2416,12 @@ KillerHub:AddTask(function()
 end)
 
 -- Notification
-KillerHub:NotifySuccess("Killer Hub", "Positions Persistence Solved & Fully Optimized!", 3)
+if KillerHub.NotifySuccess then
+    KillerHub:NotifySuccess("Killer Hub", "Positions Persistence Solved & Fully Optimized!", 3)
+elseif KillerHub.Notify then
+    KillerHub:Notify("Killer Hub", "Positions Persistence Solved & Fully Optimized!", 3)
+elseif KillerHub.NotifyWarn then
+    KillerHub:NotifyWarn("Killer Hub", "Positions Persistence Solved & Fully Optimized!", 3)
+end
 
-return killerHub
+return KillerHub
