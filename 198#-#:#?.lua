@@ -1,5 +1,5 @@
 -- ============================================================================
--- 👻 KILLER HUB | MURDER SUITE V9.7 (INSTANT STAB KILL ALL & FAST THROWN)
+-- 👻 KILLER HUB | MURDER SUITE V9.6 (FAST INSTANT THROWN & AUTO-SAVE POSITION 22222)
 -- ============================================================================
 
 if getgenv().__KillerHub_MurderSuite_Loaded then
@@ -48,7 +48,7 @@ local function loadButtonPosition()
         end)
         if success and result then return result end
     end
-    return UDim2.new(0.82, 0, 0.60, 0)
+    return UDim2.new(0.82, 0, 0.60, 0) -- Posición por defecto
 end
 
 -- Constants & Memory Caches
@@ -63,11 +63,6 @@ local cachedHasKnife = false
 local lastKnifeCheck = 0
 local cachedTarget = nil
 local wasHitboxActive = false
-
--- GC Optimization: Limpiar física cuando los jugadores salen
-KillerHub:AddTask(Players.PlayerRemoving:Connect(function(player)
-    playerFysics[player] = nil
-end))
 
 local raycastParams = RaycastParams.new()
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -336,7 +331,7 @@ local function getClosestTargetToFOV()
     return closestInnocent
 end
 
--- Motor de Predicción Balística
+-- Motor de Predicción Balística de Cuchillo
 local function getAdvancedKnifePrediction(targetChar)
     if not targetChar then return nil, nil end
     local hrp = targetChar:FindFirstChild("HumanoidRootPart")
@@ -354,7 +349,8 @@ local function getAdvancedKnifePrediction(targetChar)
         return targetPosition, targetPosition
     end
 
-    local extentsY = targetChar:GetExtentsSize().Y
+    -- CORRECCIÓN: Si el Hitbox está expandido, se normaliza la medida a 5.0 studs
+    local extentsY = (hrp.Size.Y > 3) and 5.0 or targetChar:GetExtentsSize().Y
     local scaleFactor = 1.0
     if humanoid:FindFirstChild("BodyHeightScale") then scaleFactor = humanoid.BodyHeightScale.Value end
 
@@ -516,66 +512,6 @@ local function executeInstantThrow()
     end
 
     knifeThrownRemote:FireServer(originCF, targetCF)
-end
-
--- LÓGICA DE KILL ALL SILENCIOSO (STAB) SIN TELETRANSPORTAR
-local function executeStabKillAll()
-    local knife = getKnifeTool()
-    if not knife then
-        KillerHub:NotifyWarn("Kill All", "No tienes el cuchillo equipado ni en el inventario.", 3)
-        return
-    end
-
-    local char = LocalPlayer.Character
-    if not char then return end
-
-    -- Auto-equipar el cuchillo si está en el Backpack
-    if knife.Parent ~= char then
-        local humanoid = char:FindFirstChildOfClass("Humanoid")
-        if humanoid then
-            humanoid:EquipTool(knife)
-            task.wait(0.08)
-        end
-    end
-
-    local events = knife:FindFirstChild("Events")
-    local knifeStabbed = events and events:FindFirstChild("KnifeStabbed")
-    local handleTouched = events and events:FindFirstChild("HandleTouched")
-
-    if not knifeStabbed or not handleTouched then
-        KillerHub:NotifyError("Kill All", "No se encontraron los remotos del cuchillo.", 3)
-        return
-    end
-
-    -- Iniciar la animación de puñalada en el servidor
-    knifeStabbed:FireServer()
-
-    local allPlayers = Players:GetPlayers()
-    local killedCount = 0
-
-    -- Enviar instantáneamente el evento HandleTouched a todos los personajes sin moverse
-    for i = 1, #allPlayers do
-        local player = allPlayers[i]
-        if player ~= LocalPlayer and player.Character then
-            local targetChar = player.Character
-            local hum = targetChar:FindFirstChildOfClass("Humanoid")
-            local targetPart = targetChar:FindFirstChild("HumanoidRootPart") 
-                or targetChar:FindFirstChild("UpperTorso") 
-                or targetChar:FindFirstChild("Torso") 
-                or targetChar:FindFirstChild("Head")
-
-            if hum and hum.Health > 0 and targetPart then
-                handleTouched:FireServer(targetPart)
-                killedCount = killedCount + 1
-            end
-        end
-    end
-
-    if killedCount > 0 then
-        KillerHub:NotifySuccess("Kill All", "Apuñalados " .. tostring(killedCount) .. " jugadores instantáneamente.", 3)
-    else
-        KillerHub:NotifyWarn("Kill All", "No hay otros jugadores vivos en la partida.", 3)
-    end
 end
 
 -- CREACIÓN DEL BOTÓN FLOTANTE ESTILO SHERIFF SUITE
@@ -752,11 +688,6 @@ MurderTab:CreateSlider("KnifeThrowDistance", "Throw Advance Distance", 0, 100, f
 MurderTab:CreateSlider("KnifeHorizSlider", "Horizontal prediction", 0, 300, function(value) end)
 MurderTab:CreateSlider("KnifeVertSlider", "Vertical prediction", 0, 120, function(value) end)
 
--- BOTÓN "KILL ALL" AL FINAL DE KNIFE COMBATS
-MurderTab:CreateButton("Kill All", function()
-    executeStabKillAll()
-end)
-
 MurderTab:CreateSection("Interface & Thrown Button")
 MurderTab:CreateToggle("Murder_ShowButton", "Show Thrown Button (Blatant)", function() checkWeaponVisibility() end)
 MurderTab:CreateToggle("Murder_LockBtnPos", "Lock Button Position", function() end)
@@ -822,6 +753,7 @@ local hbConn = RunService.Heartbeat:Connect(function()
                     hrp.Size = Vector3.new(2, 2, 1)
                     hrp.Transparency = 1
                     hrp.Material = Enum.Material.Plastic
+                    hrp.CanQuery = true -- Restaura detección normal al apagar hitbox
                 end
             end
         end
@@ -848,6 +780,7 @@ local hbConn = RunService.Heartbeat:Connect(function()
                 if hitboxActive then
                     if hrp.Size ~= targetSize then hrp.Size = targetSize end
                     if hrp.CanCollide then hrp.CanCollide = false end
+                    if hrp.CanQuery then hrp.CanQuery = false end -- EVITA INTERFERENCIA CON APUNTADO Y RAYCASTS
 
                     if seeHitbox then
                         if hrp.Transparency ~= targetTransparency then hrp.Transparency = targetTransparency end
@@ -1096,6 +1029,8 @@ rawNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
 
     return rawNamecall(self, ...)
 end))
+
+return KillerHub
 
 --==============================================================================
 -- KILLER HUB UI - COMBINED MODULE (FIXED POS PERSISTENCE & OPTIMIZED)
