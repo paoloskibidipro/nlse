@@ -1030,8 +1030,6 @@ rawNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
     return rawNamecall(self, ...)
 end))
 
-return KillerHub
-
 --==============================================================================
 -- KILLER HUB UI - COMBINED MODULE (FIXED POS PERSISTENCE & OPTIMIZED)
 -- Creator: Killer Hub | By Paolo
