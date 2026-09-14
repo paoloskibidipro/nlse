@@ -1,5 +1,5 @@
 -- ============================================================================
--- 👻 KILLER HUB | MURDER SUITE V9.6 (FAST INSTANT THROWN & AUTO-SAVE POSITION 22222)
+-- 👻 KILLER HUB | MURDER SUITE V9.6 (FAST INSTANT THROWN & AUTO-SAVE POSITION)
 -- ============================================================================
 
 if getgenv().__KillerHub_MurderSuite_Loaded then
