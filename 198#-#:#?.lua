@@ -10,7 +10,7 @@ if getgenv().__KillerHub_MurderSuite_Loaded then
 end
 getgenv().__KillerHub_MurderSuite_Loaded = true
 
-local KillerHub = loadstring(game:HttpGet("https://raw.githubusercontent.com/paoloskibidipro/noname/refs/heads/main/unknow.lua"))()
+local KillerHub = loadstring(game:HttpGet("https://raw.githubusercontent.com/paoloskibidipro/s-eee-ri/refs/heads/main/Slayer.lua"))()
 
 -- Servicios
 local Players = game:GetService("Players")
