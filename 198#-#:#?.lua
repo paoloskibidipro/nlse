@@ -1,5 +1,6 @@
 -- ============================================================================
--- 👻 KILLER HUB | MURDER SUITE V9.6 (FAST INSTANT THROWN & AUTO-SAVE POSITION)
+-- 👻 KILLER HUB | MURDER SUITE V10.0
+-- Wall-Aware Prediction • Anti-Jukes • Ballistic Fall • No Sheriff Interference
 -- ============================================================================
 
 if getgenv().__KillerHub_MurderSuite_Loaded then
@@ -13,15 +14,31 @@ getgenv().__KillerHub_MurderSuite_Loaded = true
 local KillerHub = loadstring(game:HttpGet("https://raw.githubusercontent.com/paoloskibidipro/s-eee-ri/refs/heads/main/Slayer.lua"))()
 
 -- Servicios
-local Players = game:GetService("Players")
-local LocalPlayer = Players.LocalPlayer
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-local Stats = game:GetService("Stats")
-local TweenService = game:GetService("TweenService")
+local Players          = game:GetService("Players")
+local LocalPlayer      = Players.LocalPlayer
+local ReplicatedStorage= game:GetService("ReplicatedStorage")
+local RunService       = game:GetService("RunService")
+local Stats            = game:GetService("Stats")
+local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
-local HttpService = game:GetService("HttpService")
-local Camera = workspace.CurrentCamera
+local HttpService      = game:GetService("HttpService")
+local Camera           = workspace.CurrentCamera
+
+-- Alias locales (más rápido que lookup global cada frame)
+local vec3New    = Vector3.new
+local vec2New    = Vector2.new
+local udim2New   = UDim2.new
+local cframeNew  = CFrame.new
+local color3RGB  = Color3.fromRGB
+local math_clamp = math.clamp
+local math_abs   = math.abs
+local math_min   = math.min
+local math_max   = math.max
+local math_sqrt  = math.sqrt
+local math_acos  = math.acos
+local math_rad   = math.rad
+local os_clock   = os.clock
+local VECTOR_ZERO= vec3New(0, 0, 0)
 
 -- Archivo de Persistencia de Posición
 local POS_FILE = "MurderSuite_ButtonPos.json"
@@ -29,54 +46,62 @@ local POS_FILE = "MurderSuite_ButtonPos.json"
 local function saveButtonPosition(pos)
     if writefile then
         pcall(function()
-            local data = {
-                XScale = pos.X.Scale,
-                XOffset = pos.X.Offset,
-                YScale = pos.Y.Scale,
-                YOffset = pos.Y.Offset
-            }
-            writefile(POS_FILE, HttpService:JSONEncode(data))
+            writefile(POS_FILE, HttpService:JSONEncode({
+                XScale = pos.X.Scale, XOffset = pos.X.Offset,
+                YScale = pos.Y.Scale, YOffset = pos.Y.Offset
+            }))
         end)
     end
 end
 
 local function loadButtonPosition()
     if isfile and readfile and isfile(POS_FILE) then
-        local success, result = pcall(function()
-            local data = HttpService:JSONDecode(readfile(POS_FILE))
-            return UDim2.new(data.XScale, data.XOffset, data.YScale, data.YOffset)
+        local ok, result = pcall(function()
+            local d = HttpService:JSONDecode(readfile(POS_FILE))
+            return udim2New(d.XScale, d.XOffset, d.YScale, d.YOffset)
         end)
-        if success and result then return result end
+        if ok and result then return result end
     end
-    return UDim2.new(0.82, 0, 0.60, 0) -- Posición por defecto
+    return udim2New(0.82, 0, 0.60, 0)
 end
 
 -- Constants & Memory Caches
-local MAX_DISTANCE_SQ = 1822500
-local wallFilterTable = {}
-local partsToCheck = {nil, nil}
-local playerFysics = {}
-local lastVisualPosition = Vector3.new(0, 0, 0)
-local lastActualPosition = Vector3.new(0, 0, 0)
-local lastTracerPosition = Vector3.new(0, 0, 0)
-local cachedHasKnife = false
-local lastKnifeCheck = 0
-local cachedTarget = nil
-local wasHitboxActive = false
+local MAX_DISTANCE_SQ   = 1822500
+local GRAVITY           = workspace.Gravity > 0 and workspace.Gravity or 196.2
+local wallFilterTable   = {}
+local partsToCheck      = {nil, nil}
+local playerFysics      = setmetatable({}, { __mode = "k" })  -- weak keys
+local originalPartData  = setmetatable({}, { __mode = "k" })  -- weak keys
+local lastVisualPosition= VECTOR_ZERO
+local lastActualPosition= VECTOR_ZERO
+local lastTracerPosition= VECTOR_ZERO
+local cachedHasKnife    = false
+local lastKnifeCheck    = 0
+local cachedTarget      = nil
+local wasHitboxActive   = false
+
+-- Lista de partes del cuerpo para el hitbox (SIN HumanoidRootPart)
+local HITBOX_PART_NAMES = {
+    "Head", "UpperTorso", "LowerTorso", "Torso",
+    "LeftUpperArm", "LeftLowerArm", "LeftHand",
+    "RightUpperArm", "RightLowerArm", "RightHand",
+    "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+    "RightUpperLeg", "RightLowerLeg", "RightFoot",
+}
 
 local raycastParams = RaycastParams.new()
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 
--- Caché de Viewport y DPI
-local cachedViewportSize = Camera.ViewportSize
-local cachedScreenCenter = Vector2.new(cachedViewportSize.X / 2, cachedViewportSize.Y / 2)
-local cachedDpiScale = 1
+-- Cache de viewport y DPI
+local cachedViewportSize  = Camera.ViewportSize
+local cachedScreenCenter  = vec2New(cachedViewportSize.X / 2, cachedViewportSize.Y / 2)
+local cachedDpiScale      = 1
 
 local function updateViewportCache()
     cachedViewportSize = Camera.ViewportSize
-    cachedScreenCenter = Vector2.new(cachedViewportSize.X / 2, cachedViewportSize.Y / 2)
-    local viewportY = cachedViewportSize.Y
-    cachedDpiScale = viewportY > 0 and math.max(1, 1080 / viewportY) or 1
+    cachedScreenCenter = vec2New(cachedViewportSize.X / 2, cachedViewportSize.Y / 2)
+    local vy = cachedViewportSize.Y
+    cachedDpiScale = vy > 0 and math_max(1, 1080 / vy) or 1
 end
 updateViewportCache()
 KillerHub:AddTask(Camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateViewportCache))
@@ -87,19 +112,21 @@ FOVCircle.Thickness = 0.8; FOVCircle.NumSides = 36; FOVCircle.Filled = false; FO
 KillerHub:AddTask(FOVCircle)
 
 local PredRingOuter = Drawing.new("Circle")
-PredRingOuter.Radius = 6.0; PredRingOuter.Thickness = 1.2; PredRingOuter.Filled = false; PredRingOuter.Color = Color3.fromRGB(255, 35, 35); PredRingOuter.Visible = false
+PredRingOuter.Radius = 6.0; PredRingOuter.Thickness = 1.2; PredRingOuter.Filled = false
+PredRingOuter.Color = color3RGB(255, 35, 35); PredRingOuter.Visible = false
 KillerHub:AddTask(PredRingOuter)
 
 local PredDotCenter = Drawing.new("Circle")
-PredDotCenter.Radius = 2.5; PredDotCenter.Thickness = 1; PredDotCenter.Filled = true; PredDotCenter.Color = Color3.fromRGB(255, 255, 255); PredDotCenter.Visible = false
+PredDotCenter.Radius = 2.5; PredDotCenter.Thickness = 1; PredDotCenter.Filled = true
+PredDotCenter.Color = color3RGB(255, 255, 255); PredDotCenter.Visible = false
 KillerHub:AddTask(PredDotCenter)
 
 local PredLine = Drawing.new("Line")
-PredLine.Thickness = 1.0; PredLine.Color = Color3.fromRGB(185, 0, 255); PredLine.Transparency = 0.65; PredLine.Visible = false
+PredLine.Thickness = 1.0; PredLine.Color = color3RGB(185, 0, 255); PredLine.Transparency = 0.65; PredLine.Visible = false
 KillerHub:AddTask(PredLine)
 
 local TracerLine = Drawing.new("Line")
-TracerLine.Thickness = 1.0; TracerLine.Color = Color3.fromRGB(140, 0, 255); TracerLine.Transparency = 0.9; TracerLine.Visible = false
+TracerLine.Thickness = 1.0; TracerLine.Color = color3RGB(140, 0, 255); TracerLine.Transparency = 0.9; TracerLine.Visible = false
 KillerHub:AddTask(TracerLine)
 
 -- Helper para leer Flags
@@ -109,19 +136,19 @@ local function GetFlag(flagName, default)
     return f.CurrentValue
 end
 
--- Caché de Materiales
+-- Caché de materiales
 local materialCache = {}
 local function getMaterialEnum(matString)
     if materialCache[matString] then return materialCache[matString] end
-    local success, mat = pcall(function() return Enum.Material[matString] end)
-    local result = success and mat or Enum.Material.Plastic
+    local ok, mat = pcall(function() return Enum.Material[matString] end)
+    local result = ok and mat or Enum.Material.Plastic
     materialCache[matString] = result
     return result
 end
 
 -- Auxiliares del juego
 local function hasKnifeInInventory()
-    local now = os.clock()
+    local now = os_clock()
     if now - lastKnifeCheck > 0.15 then
         lastKnifeCheck = now
         local char = LocalPlayer.Character
@@ -146,7 +173,7 @@ local function checkPlayerHasGun(player)
     return backpack and backpack:FindFirstChild("Gun") ~= nil
 end
 
--- Wall Check optimizado
+-- Wall Check optimizado (para selección de objetivo)
 local function isVisibleThroughWalls(targetChar)
     if not targetChar then return false end
     local localChar = LocalPlayer.Character
@@ -169,36 +196,29 @@ local function isVisibleThroughWalls(targetChar)
                 wallFilterTable[1] = localChar
                 wallFilterTable[2] = targetChar
                 wallFilterTable[3] = Camera
-                
+
                 local visible = true
-                for step = 1, 3 do
+                for _ = 1, 3 do
                     raycastParams.FilterDescendantsInstances = wallFilterTable
                     local raycastResult = workspace:Raycast(origin, direction, raycastParams)
-
                     if not raycastResult then
-                        visible = true
-                        break
+                        visible = true; break
                     end
-
                     local hitInst = raycastResult.Instance
                     if hitInst then
                         if not hitInst.CanCollide or hitInst.Transparency >= 0.75 then
                             table.insert(wallFilterTable, hitInst)
                         else
-                            visible = false
-                            break
+                            visible = false; break
                         end
                     else
-                        visible = true
-                        break
+                        visible = true; break
                     end
                 end
-
                 if visible then return true end
             end
         end
     end
-
     return false
 end
 
@@ -210,16 +230,12 @@ local function updateSheriffTarget()
     if CurrentSheriff and CurrentSheriff.Parent == Players then
         local char = CurrentSheriff.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if hum and hum.Health > 0 and checkPlayerHasGun(CurrentSheriff) then
-            return 
-        end
+        if hum and hum.Health > 0 and checkPlayerHasGun(CurrentSheriff) then return end
     end
-
-    local now = os.clock()
+    local now = os_clock()
     if now - lastSheriffScan > 0.6 then
         lastSheriffScan = now
         CurrentSheriff = nil
-        
         local allPlayers = Players:GetPlayers()
         for i = 1, #allPlayers do
             local player = allPlayers[i]
@@ -235,50 +251,41 @@ local function updateSheriffTarget()
     end
 end
 
--- Selección de Objetivo
+-- Selección de objetivo
 local function getClosestTargetToFOV()
-    local localHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local localChar = LocalPlayer.Character
+    local localHrp = localChar and localChar:FindFirstChild("HumanoidRootPart")
     if not localHrp then return nil end
 
-    local aimType = GetFlag("KnifeAimType", "Target FOV")
-    local wallCheck = GetFlag("KnifeWallCheckActive", false)
+    local aimType           = GetFlag("KnifeAimType", "Target FOV")
+    local wallCheck         = GetFlag("KnifeWallCheckActive", false)
     local prioritizeSheriff = GetFlag("PrioritizeSheriffActive", false)
-    local fovRadius = GetFlag("FovRadiusMurder", 150)
-    local allPlayers = Players:GetPlayers()
+    local fovRadius         = GetFlag("FovRadiusMurder", 150)
+    local allPlayers        = Players:GetPlayers()
 
     if aimType == "Nearest Player" then
-        local nearestPlayer = nil
-        local shortestDistSq = MAX_DISTANCE_SQ
-
+        local nearestPlayer, shortestDistSq = nil, MAX_DISTANCE_SQ
         for i = 1, #allPlayers do
             local player = allPlayers[i]
             if player ~= LocalPlayer and player.Character then
                 local hrp = player.Character:FindFirstChild("HumanoidRootPart")
                 local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
-
                 if hrp and humanoid and humanoid.Health > 0 then
                     local diff = hrp.Position - localHrp.Position
                     local distSq = diff:Dot(diff)
                     if distSq <= shortestDistSq then
-                        if wallCheck and not isVisibleThroughWalls(player.Character) then
-                            continue
-                        end
+                        if wallCheck and not isVisibleThroughWalls(player.Character) then continue end
                         shortestDistSq = distSq
                         nearestPlayer = player
                     end
                 end
             end
         end
-
         cachedTarget = nearestPlayer
         return nearestPlayer
     end
 
-    if prioritizeSheriff then
-        updateSheriffTarget()
-    else
-        CurrentSheriff = nil
-    end
+    if prioritizeSheriff then updateSheriffTarget() else CurrentSheriff = nil end
 
     if CurrentSheriff and CurrentSheriff.Character then
         local hrp = CurrentSheriff.Character:FindFirstChild("HumanoidRootPart")
@@ -287,7 +294,7 @@ local function getClosestTargetToFOV()
             if diff:Dot(diff) <= MAX_DISTANCE_SQ then
                 local screenPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
                 if onScreen then
-                    local distToCenter = (Vector2.new(screenPos.X, screenPos.Y) - cachedScreenCenter).Magnitude
+                    local distToCenter = (vec2New(screenPos.X, screenPos.Y) - cachedScreenCenter).Magnitude
                     if distToCenter < fovRadius then
                         if not wallCheck or isVisibleThroughWalls(CurrentSheriff.Character) then
                             cachedTarget = CurrentSheriff
@@ -299,26 +306,20 @@ local function getClosestTargetToFOV()
         end
     end
 
-    local closestInnocent = nil
-    local shortestDistance = fovRadius 
-
+    local closestInnocent, shortestDistance = nil, fovRadius
     for i = 1, #allPlayers do
         local player = allPlayers[i]
         if player ~= LocalPlayer and player ~= CurrentSheriff and player.Character then
             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
             local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
-            
             if hrp and humanoid and humanoid.Health > 0 then
                 local diff = hrp.Position - localHrp.Position
                 if diff:Dot(diff) > MAX_DISTANCE_SQ then continue end
-
                 local screenPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
                 if onScreen then
-                    local distToCenter = (Vector2.new(screenPos.X, screenPos.Y) - cachedScreenCenter).Magnitude
+                    local distToCenter = (vec2New(screenPos.X, screenPos.Y) - cachedScreenCenter).Magnitude
                     if distToCenter < shortestDistance then
-                        if wallCheck and not isVisibleThroughWalls(player.Character) then
-                            continue
-                        end
+                        if wallCheck and not isVisibleThroughWalls(player.Character) then continue end
                         shortestDistance = distToCenter
                         closestInnocent = player
                     end
@@ -326,160 +327,287 @@ local function getClosestTargetToFOV()
             end
         end
     end
-
     cachedTarget = closestInnocent
     return closestInnocent
 end
 
--- Motor de Predicción Balística de Cuchillo
+-- ============================================================================
+-- ANTI-JUKES (doble detección: dirección + multi-muestra)
+-- ============================================================================
+local function computeJukeFactor(physicsData, currentVelocity)
+    local factor = 1.0
+
+    -- Método 1: cambio de dirección de velocidad (rápido)
+    if physicsData and physicsData.LastVelocity then
+        local lastH = vec3New(physicsData.LastVelocity.X, 0, physicsData.LastVelocity.Z)
+        local curH  = vec3New(currentVelocity.X, 0, currentVelocity.Z)
+        if lastH.Magnitude > 1 and curH.Magnitude > 1 then
+            local dot = math_clamp(lastH.Unit:Dot(curH.Unit), -1, 1)
+            if dot < 0.94 then
+                factor = factor * math_clamp((dot + 1) / 1.94, 0.25, 1.0)
+            end
+        end
+    end
+
+    -- Método 2: análisis multi-muestra (más robusto para jukes reales)
+    if physicsData and physicsData.Samples and #physicsData.Samples >= 3 then
+        local samples = physicsData.Samples
+        local n = #samples
+        local s1, s2, s3 = samples[n - 2], samples[n - 1], samples[n]
+        local v1 = (s2.pos - s1.pos) / math_max(s2.t - s1.t, 0.01)
+        local v2 = (s3.pos - s2.pos) / math_max(s3.t - s2.t, 0.01)
+        if v1.Magnitude > 2 and v2.Magnitude > 2 then
+            local dot = math_clamp(v1.Unit:Dot(v2.Unit), -1, 1)
+            local angle = math_acos(dot)
+            if angle > math_rad(30) then
+                local turnRatio = math_clamp((angle - math_rad(30)) / math_rad(90), 0, 1)
+                factor = factor * (1.0 - turnRatio * 0.60)
+            end
+        end
+    end
+
+    return math_clamp(factor, 0.15, 1.0)
+end
+
+-- ============================================================================
+-- WALL-AWARE CLAMP (evita que el cuchillo se incruste en paredes al doblar esquinas)
+-- ============================================================================
+local function getKnifeOriginWorld()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local hand = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
+    if hand then return hand.Position end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    return hrp and hrp.Position or nil
+end
+
+local function clampPredictionForWalls(originPos, targetPos, predictedPos, targetChar)
+    if not originPos or not targetChar then return predictedPos end
+
+    -- 1) Rayo desde origen hacia la posición predicha
+    table.clear(wallFilterTable)
+    wallFilterTable[1] = LocalPlayer.Character
+    wallFilterTable[2] = targetChar
+    wallFilterTable[3] = Camera
+    raycastParams.FilterDescendantsInstances = wallFilterTable
+
+    local dirToPred = predictedPos - originPos
+    if dirToPred.Magnitude < 0.1 then return predictedPos end
+
+    local rayToPred = workspace:Raycast(originPos, dirToPred, raycastParams)
+    if rayToPred and rayToPred.Instance and rayToPred.Instance.CanCollide
+       and rayToPred.Instance.Transparency < 0.75 then
+
+        -- Pared bloquea el trayecto hacia el predicho. ¿Podemos llegar al objetivo actual?
+        local dirToTarget = targetPos - originPos
+        local rayToTarget = workspace:Raycast(originPos, dirToTarget, raycastParams)
+
+        if rayToTarget and rayToTarget.Instance and rayToTarget.Instance.CanCollide
+           and rayToTarget.Instance.Transparency < 0.75 then
+            -- El objetivo actual TAMBIÉN está bloqueado. Devolvemos la posición actual
+            -- (no ganamos nada prediciendo, solo se incrustaría el cuchillo).
+            return targetPos
+        end
+
+        -- El objetivo actual SÍ se alcanza, pero el predicho no. Recortamos la
+        -- predicción al punto seguro justo antes de la pared.
+        local hitDist = (rayToPred.Position - originPos).Magnitude
+        local safeDist = math_max(0, hitDist - 1.0)
+        local distToTarget = dirToTarget.Magnitude
+
+        if safeDist >= distToTarget then
+            -- La pared está más allá del objetivo: usamos la posición actual.
+            return targetPos
+        end
+
+        -- Cortamos la predicción al punto seguro sobre la recta origen→predicho
+        return originPos + dirToPred.Unit * safeDist
+    end
+
+    -- 2) Chequeo clásico desde el objetivo hacia el predicho (por si hay pared
+    --    justo detrás del jugador).
+    table.clear(wallFilterTable)
+    wallFilterTable[1] = targetChar
+    wallFilterTable[2] = LocalPlayer.Character
+    wallFilterTable[3] = Camera
+    raycastParams.FilterDescendantsInstances = wallFilterTable
+
+    local wallRay = workspace:Raycast(targetPos, predictedPos - targetPos, raycastParams)
+    if wallRay and wallRay.Instance and wallRay.Instance.CanCollide then
+        local hitDistance = (wallRay.Position - targetPos).Magnitude
+        if hitDistance > 0.5 then
+            return targetPos + (predictedPos - targetPos).Unit * (hitDistance - 0.4)
+        else
+            return targetPos
+        end
+    end
+
+    return predictedPos
+end
+
+-- ============================================================================
+-- MOTOR DE PREDICCIÓN BALÍSTICA DEL CUCHILLO (V10 - Mejorado)
+-- ============================================================================
 local function getAdvancedKnifePrediction(targetChar)
     if not targetChar then return nil, nil end
     local hrp = targetChar:FindFirstChild("HumanoidRootPart")
     local humanoid = targetChar:FindFirstChildOfClass("Humanoid")
-    local localHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-    
+    local localChar = LocalPlayer.Character
+    local localHrp = localChar and localChar:FindFirstChild("HumanoidRootPart")
+
     if not hrp or not humanoid or not localHrp then return nil, nil end
 
     local targetPlayer = Players:GetPlayerFromCharacter(targetChar)
     local targetPosition = hrp.Position
     local distance = (targetPosition - localHrp.Position).Magnitude
-    local physicsData = playerFysics[targetPlayer]
-    
+    local physicsData = targetPlayer and playerFysics[targetPlayer]
+
     if physicsData and physicsData.IsLaggingOut then
         return targetPosition, targetPosition
     end
 
-    -- CORRECCIÓN: Si el Hitbox está expandido, se normaliza la medida a 5.0 studs
-    local extentsY = (hrp.Size.Y > 3) and 5.0 or targetChar:GetExtentsSize().Y
+    -- Ajuste para personajes pequeños (bebés)
+    local extentsY = targetChar:GetExtentsSize().Y
     local scaleFactor = 1.0
     if humanoid:FindFirstChild("BodyHeightScale") then scaleFactor = humanoid.BodyHeightScale.Value end
-
     if extentsY < 4.8 or scaleFactor < 0.85 then
-        local heightDeficit = math.clamp((5.1 - extentsY) * 0.52, 0.4, 2.3)
-        targetPosition = targetPosition - Vector3.new(0, heightDeficit, 0)
+        local deficit = math_clamp((5.1 - extentsY) * 0.52, 0.4, 2.3)
+        targetPosition = targetPosition - vec3New(0, deficit, 0)
     end
 
-    local smoothVelocity = physicsData and physicsData.SmoothedVelocity or Vector3.new(0, 0, 0)
-    if smoothVelocity:Dot(smoothVelocity) < 0.0225 then return targetPosition, targetPosition end
+    local smoothVelocity = physicsData and physicsData.SmoothedVelocity or VECTOR_ZERO
+    if smoothVelocity:Dot(smoothVelocity) < 0.0225 then
+        -- Jugador quieto: devolvemos posición actual (sin predicción)
+        return targetPosition, targetPosition
+    end
 
+    -- Ping y tiempo de viaje
     local rawPing = 0.06
     if Stats and Stats:FindFirstChild("Network") and Stats.Network:FindFirstChild("ServerToClientPing") then
         rawPing = Stats.Network.ServerToClientPing:GetValue() / 1000
     end
-    local ping = math.clamp(rawPing, 0.01, 0.25)
+    local ping = math_clamp(rawPing, 0.01, 0.25)
     local travelTime = (distance / 85) + ping
 
-    local horizontalVelocity = Vector3.new(smoothVelocity.X, 0, smoothVelocity.Z)
+    local horizontalVelocity = vec3New(smoothVelocity.X, 0, smoothVelocity.Z)
     local exactSpeed = horizontalVelocity.Magnitude
 
     local MAX_WALKSPEED = 16.715
-    if exactSpeed > MAX_WALKSPEED then 
+    if exactSpeed > MAX_WALKSPEED then
         horizontalVelocity = horizontalVelocity.Unit * MAX_WALKSPEED
         exactSpeed = MAX_WALKSPEED
     end
 
-    local jukeFactor = 1.0
+    -- ─────── ANTI-JUKES ───────
+    local jukeFactor = computeJukeFactor(physicsData, smoothVelocity)
+
+    -- Decaimiento por pérdida de velocidad
     if physicsData and physicsData.LastVelocity then
-        local lastHorizVel = Vector3.new(physicsData.LastVelocity.X, 0, physicsData.LastVelocity.Z)
-        local lastSpeed = lastHorizVel.Magnitude
-        
-        if exactSpeed > 1 and lastSpeed > 1 then
-            local currentDir = horizontalVelocity.Unit
-            local lastDir = lastHorizVel.Unit
-            local dotProduct = currentDir:Dot(lastDir)
-            
-            if dotProduct < 0.94 then
-                jukeFactor = math.clamp(dotProduct, 0.10, 1.0)
-            end
-            
-            if exactSpeed < lastSpeed * 0.85 then
-                local decelerationRatio = exactSpeed / lastSpeed
-                jukeFactor = jukeFactor * math.clamp(decelerationRatio, 0.05, 1.0)
-            end
+        local lastSpeed = vec3New(physicsData.LastVelocity.X, 0, physicsData.LastVelocity.Z).Magnitude
+        if exactSpeed < lastSpeed * 0.85 and lastSpeed > 1 then
+            jukeFactor = jukeFactor * math_clamp(exactSpeed / lastSpeed, 0.25, 1.0)
         end
     end
 
-    local velocityScale = math.clamp(exactSpeed / MAX_WALKSPEED, 0, 1)
-    if exactSpeed < 12 then
-        velocityScale = math.pow(velocityScale, 1.4)
-    end
+    local velocityScale = math_clamp(exactSpeed / MAX_WALKSPEED, 0, 1)
+    if exactSpeed < 12 then velocityScale = velocityScale ^ 1.4 end
 
-    local shortRangeBoost = distance < 20 and 1.15 or 1.0
-    local dynamicScale = (1.0 + (distance * 0.004)) * shortRangeBoost
-    local maxElasticCap = math.clamp(distance * 0.38, 3.5, 13.5)
-    
+    -- Configs del usuario
     local hPredConfig = GetFlag("KnifeHorizSlider", 145) / 1000
     local vPredConfig = GetFlag("KnifeVertSlider", 40) / 1000
 
-    local horizontalOffset = horizontalVelocity * (hPredConfig * 6.8) * travelTime * dynamicScale * jukeFactor * velocityScale
-    if horizontalOffset:Dot(horizontalOffset) > (maxElasticCap * maxElasticCap) then 
-        horizontalOffset = horizontalOffset.Unit * maxElasticCap 
+    -- ─────── HORIZONTAL ───────
+    local shortRangeBoost = distance < 20 and 1.15 or 1.0
+    local dynamicScale = (1.0 + (distance * 0.004)) * shortRangeBoost
+    local maxElasticCap = math_clamp(distance * 0.38, 3.5, 13.5)
+
+    local horizontalOffset = horizontalVelocity * (hPredConfig * 6.8) * travelTime
+        * dynamicScale * jukeFactor * velocityScale
+    if horizontalOffset:Dot(horizontalOffset) > (maxElasticCap * maxElasticCap) then
+        horizontalOffset = horizontalOffset.Unit * maxElasticCap
     end
 
-    local verticalOffset = Vector3.new(0, 0, 0)
+    -- ─────── VERTICAL ───────
+    local verticalOffset = VECTOR_ZERO
     local isAir = (humanoid.FloorMaterial == Enum.Material.Air)
-    local absYVelocity = math.abs(smoothVelocity.Y)
+    local absYVelocity = math_abs(smoothVelocity.Y)
 
-    if isAir then
-        local verticalVelocity = math.clamp(smoothVelocity.Y, -20, 25)
+    if isAir and absYVelocity > 0.5 then
+        local verticalVelocity = math_clamp(smoothVelocity.Y, -25, 30)
         local verticalDistanceScale = 1 / (1 + (distance * 0.005))
-        local fallDamping = verticalVelocity < 0 and 0.32 or 0.70
-        local calculatedYOffset = verticalVelocity * fallDamping * (vPredConfig * 5.8) * travelTime * verticalDistanceScale
 
-        if calculatedYOffset < 0 then
+        if verticalVelocity < -0.5 then
+            -- ═══ CAYENDO: balística pura con clamp a tiempo de aterrizaje ═══
             table.clear(wallFilterTable)
             wallFilterTable[1] = targetChar
             wallFilterTable[2] = LocalPlayer.Character
             wallFilterTable[3] = Camera
             raycastParams.FilterDescendantsInstances = wallFilterTable
 
-            local floorRay = workspace:Raycast(targetPosition, Vector3.new(0, -30, 0), raycastParams)
+            local floorRay = workspace:Raycast(targetPosition, vec3New(0, -50, 0), raycastParams)
+            local v0 = math_abs(verticalVelocity)
+
             if floorRay then
-                local maxPossibleDrop = math.max(0, targetPosition.Y - (floorRay.Position.Y + 2.1))
-                if math.abs(calculatedYOffset) > maxPossibleDrop then
-                    calculatedYOffset = -maxPossibleDrop
+                local h = targetPosition.Y - floorRay.Position.Y  -- altura sobre el piso
+                if h > 0.1 then
+                    -- Tiempo hasta tocar el piso: tFall = (v0 + √(v0² + 2·g·h)) / g
+                    local tFall = (v0 + math_sqrt(v0 * v0 + 2 * GRAVITY * h)) / GRAVITY
+
+                    -- Tiempo deseado por el usuario (escalado por el slider vertical)
+                    local desiredT = (vPredConfig * 5.8) * travelTime * verticalDistanceScale
+
+                    -- Clamp: nunca predecimos más allá del aterrizaje
+                    local t = math_min(desiredT, tFall * 0.92)
+
+                    -- Fórmula balística: y = -v0·t - ½·g·t²
+                    local yOffset = -(v0 * t + 0.5 * GRAVITY * t * t)
+
+                    -- Segundo clamp: nunca por debajo del piso (margen 1 stud)
+                    local maxDrop = h - 1.0
+                    if maxDrop < 0 then maxDrop = 0 end
+                    if yOffset < -maxDrop then yOffset = -maxDrop end
+
+                    verticalOffset = vec3New(0, yOffset, 0)
                 end
+            else
+                -- Sin piso detectado: predicción limitada
+                local calculatedYOffset = verticalVelocity * 0.32
+                    * (vPredConfig * 5.8) * travelTime * verticalDistanceScale
+                verticalOffset = vec3New(0, math_max(calculatedYOffset, -20), 0)
             end
-        end
-
-        verticalOffset = Vector3.new(0, calculatedYOffset, 0)
-    elseif absYVelocity > 0.02 then
-        local verticalVelocity = smoothVelocity.Y
-        local rampCompensationFactor = 1.20
-        local sliderScale = (vPredConfig / 0.040)
-        verticalOffset = Vector3.new(0, verticalVelocity * travelTime * sliderScale * rampCompensationFactor, 0)
-    end
-
-    local finalPredictedPos = targetPosition + horizontalOffset + verticalOffset
-    
-    table.clear(wallFilterTable)
-    wallFilterTable[1] = targetChar
-    wallFilterTable[2] = LocalPlayer.Character
-    wallFilterTable[3] = Camera
-    raycastParams.FilterDescendantsInstances = wallFilterTable
-    
-    local wallRay = workspace:Raycast(targetPosition, finalPredictedPos - targetPosition, raycastParams)
-    if wallRay and wallRay.Instance and wallRay.Instance.CanCollide then
-        local hitDistance = (wallRay.Position - targetPosition).Magnitude
-        if hitDistance > 0.5 then
-            finalPredictedPos = targetPosition + (finalPredictedPos - targetPosition).Unit * (hitDistance - 0.4)
         else
-            finalPredictedPos = targetPosition
+            -- ═══ SUBIENDO: mantener comportamiento original ═══
+            local calculatedYOffset = verticalVelocity * 0.70
+                * (vPredConfig * 5.8) * travelTime * verticalDistanceScale
+            verticalOffset = vec3New(0, calculatedYOffset, 0)
         end
+    elseif absYVelocity > 0.02 then
+        -- Escaleras / rampas
+        local rampCompensation = 1.20
+        local sliderScale = (vPredConfig / 0.040)
+        verticalOffset = vec3New(0, smoothVelocity.Y * travelTime * sliderScale * rampCompensation, 0)
     end
+
+    -- ─────── APLICAR WALL-AWARE CLAMP ───────
+    local originPos = getKnifeOriginWorld()
+    local rawFinalPred = targetPosition + horizontalOffset + verticalOffset
+    local finalPredictedPos = clampPredictionForWalls(originPos, targetPosition, rawFinalPred, targetChar)
 
     return targetPosition, finalPredictedPos
 end
 
--- LÓGICA DE LANZAMIENTO INSTANTÁNEO + FAST THROW
+-- ============================================================================
+-- LANZAMIENTO INSTANTÁNEO + FAST THROW
+-- ============================================================================
 local function executeInstantThrow()
     local knife = getKnifeTool()
     if not knife then return end
 
     local events = knife:FindFirstChild("Events")
     local knifeThrownRemote = events and events:FindFirstChild("KnifeThrown")
-    local handle = knife:FindFirstChild("Handle") or (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("RightHand"))
-    
+    local handle = knife:FindFirstChild("Handle")
+        or (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("RightHand"))
+
     if not knifeThrownRemote or not handle then return end
 
     local originCF = handle.CFrame
@@ -488,38 +616,38 @@ local function executeInstantThrow()
 
     if targetPlayer and targetPlayer.Character then
         local _, predictedPos = getAdvancedKnifePrediction(targetPlayer.Character)
-        if predictedPos then
-            targetCF = CFrame.new(predictedPos)
-        end
+        if predictedPos then targetCF = cframeNew(predictedPos) end
     end
 
     if not targetCF then
         local mouse = LocalPlayer:GetMouse()
-        targetCF = mouse and mouse.Hit or CFrame.new(Camera.CFrame.Position + (Camera.CFrame.LookVector * 100))
+        targetCF = mouse and mouse.Hit or cframeNew(Camera.CFrame.Position + (Camera.CFrame.LookVector * 100))
     end
 
+    -- Modo FAST: avanzar el origen del cuchillo
     local throwType = GetFlag("KnifeThrowType", "Normal")
     local throwDistConfig = GetFlag("KnifeThrowDistance", 14)
 
     if throwType == "Fast" and throwDistConfig > 0 then
-        local direction = (targetCF.Position - originCF.Position)
+        local direction = targetCF.Position - originCF.Position
         local dist = direction.Magnitude
         if dist > 0 then
-            local lookDir = direction.Unit
-            local advanceDistance = math.min(throwDistConfig, dist * 0.75)
-            originCF = originCF + (lookDir * advanceDistance)
+            local advanceDistance = math_min(throwDistConfig, dist * 0.75)
+            originCF = originCF + (direction.Unit * advanceDistance)
         end
     end
 
     knifeThrownRemote:FireServer(originCF, targetCF)
 end
 
--- CREACIÓN DEL BOTÓN FLOTANTE ESTILO SHERIFF SUITE
+-- ============================================================================
+-- BOTÓN FLOTANTE ESTILO SHERIFF SUITE
+-- ============================================================================
 local cachedScreenGui, cachedShootButton, checkWeaponVisibility
 
 local function setupThrownButtonGUI()
     local parentGui = (gethui and gethui()) or game:GetService("CoreGui") or LocalPlayer:WaitForChild("PlayerGui")
-    
+
     local oldGui = parentGui:FindFirstChild("KillerHub_MurderThrownGui")
     if oldGui then oldGui:Destroy() end
 
@@ -531,12 +659,12 @@ local function setupThrownButtonGUI()
 
     local buttonSize = GetFlag("Murder_BtnSize", 95)
     local savedPos = loadButtonPosition()
-    
+
     cachedShootButton = Instance.new("ImageButton")
     cachedShootButton.Name = "ThrownButton"
-    cachedShootButton.Size = UDim2.new(0, buttonSize, 0, buttonSize)
+    cachedShootButton.Size = udim2New(0, buttonSize, 0, buttonSize)
     cachedShootButton.Position = savedPos
-    cachedShootButton.BackgroundColor3 = Color3.fromRGB(15, 6, 26)
+    cachedShootButton.BackgroundColor3 = color3RGB(15, 6, 26)
     cachedShootButton.BackgroundTransparency = 0.05
     cachedShootButton.BorderSizePixel = 0
     cachedShootButton.AutoButtonColor = false
@@ -548,7 +676,7 @@ local function setupThrownButtonGUI()
     corner.Parent = cachedShootButton
 
     local glowOverlay = Instance.new("Frame")
-    glowOverlay.Size = UDim2.new(1, 0, 1, 0)
+    glowOverlay.Size = udim2New(1, 0, 1, 0)
     glowOverlay.BackgroundTransparency = 1
     glowOverlay.ZIndex = cachedShootButton.ZIndex + 1
     glowOverlay.Parent = cachedShootButton
@@ -559,23 +687,23 @@ local function setupThrownButtonGUI()
 
     local uiGradient = Instance.new("UIGradient")
     uiGradient.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(24, 8, 43)), 
-        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(131, 46, 222)), 
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(24, 8, 43))
+        ColorSequenceKeypoint.new(0, color3RGB(24, 8, 43)),
+        ColorSequenceKeypoint.new(0.5, color3RGB(131, 46, 222)),
+        ColorSequenceKeypoint.new(1, color3RGB(24, 8, 43))
     })
-    uiGradient.Offset = Vector2.new(0, 0)
-    uiGradient.Rotation = 0
     uiGradient.Parent = glowOverlay
 
-    local tweenRot = TweenService:Create(uiGradient, TweenInfo.new(3, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), {Rotation = 360})
+    local tweenRot = TweenService:Create(uiGradient,
+        TweenInfo.new(3, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1),
+        {Rotation = 360})
     tweenRot:Play()
     KillerHub:AddTask(tweenRot)
 
     local decalTexture = Instance.new("ImageLabel")
     decalTexture.Name = "CrosshairDecal"
-    decalTexture.Size = UDim2.new(0.38, 0, 0.38, 0)
-    decalTexture.AnchorPoint = Vector2.new(0.5, 0.5)
-    decalTexture.Position = UDim2.new(0.5, 0, 0.44, 0)
+    decalTexture.Size = udim2New(0.38, 0, 0.38, 0)
+    decalTexture.AnchorPoint = vec2New(0.5, 0.5)
+    decalTexture.Position = udim2New(0.5, 0, 0.44, 0)
     decalTexture.BackgroundTransparency = 1
     decalTexture.Image = "rbxassetid://125754446555599"
     decalTexture.ZIndex = cachedShootButton.ZIndex + 2
@@ -588,12 +716,11 @@ local function setupThrownButtonGUI()
 
     local label = Instance.new("TextLabel")
     label.Name = "MainLabel"
-    label.Size = UDim2.new(1, 0, 0.2, 0)
-    label.Position = UDim2.new(0, 0, 0.75, 0)
+    label.Size = udim2New(1, 0, 0.2, 0)
+    label.Position = udim2New(0, 0, 0.75, 0)
     label.BackgroundTransparency = 1
     label.Text = "THROWN"
-    label.TextColor3 = Color3.fromRGB(255, 255, 255)
-    label.TextSize = 14
+    label.TextColor3 = color3RGB(255, 255, 255)
     label.Font = Enum.Font.GothamBold
     label.TextScaled = true
     label.ZIndex = cachedShootButton.ZIndex + 2
@@ -604,19 +731,21 @@ local function setupThrownButtonGUI()
     labelConstraint.MinTextSize = 8
     labelConstraint.Parent = label
 
+    -- Drag + autoguardado
     local dragging = false
     local dragInput, dragStart, startPos
 
     cachedShootButton.InputBegan:Connect(function(input)
-        if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
-            TweenService:Create(glowOverlay, TweenInfo.new(0.01, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundTransparency = 0.02}):Play()
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            TweenService:Create(glowOverlay,
+                TweenInfo.new(0.01, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                {BackgroundTransparency = 0.02}):Play()
             executeInstantThrow()
-            
+
             if not GetFlag("Murder_LockBtnPos", false) then
                 dragging = true
                 dragStart = input.Position
                 startPos = cachedShootButton.Position
-                
                 local cChanged
                 cChanged = input.Changed:Connect(function()
                     if input.UserInputState == Enum.UserInputState.End then
@@ -630,9 +759,11 @@ local function setupThrownButtonGUI()
     end)
 
     cachedShootButton.InputEnded:Connect(function(input)
-        if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
-            TweenService:Create(glowOverlay, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundTransparency = 1}):Play()
-            if dragging then 
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            TweenService:Create(glowOverlay,
+                TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+                {BackgroundTransparency = 1}):Play()
+            if dragging then
                 dragging = false
                 saveButtonPosition(cachedShootButton.Position)
             end
@@ -648,7 +779,9 @@ local function setupThrownButtonGUI()
     UserInputService.InputChanged:Connect(function(input)
         if input == dragInput and dragging and not GetFlag("Murder_LockBtnPos", false) then
             local delta = input.Position - dragStart
-            cachedShootButton.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            cachedShootButton.Position = udim2New(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
     end)
 end
@@ -657,82 +790,123 @@ setupThrownButtonGUI()
 
 checkWeaponVisibility = function()
     if not cachedScreenGui then return end
-    local showBtn = GetFlag("Murder_ShowButton", false)
-    local smartVis = GetFlag("SmartHandVisibility", false)
-    local hasKnife = hasKnifeInInventory()
+    local showBtn   = GetFlag("Murder_ShowButton", false)
+    local smartVis  = GetFlag("SmartHandVisibility", false)
+    local hasKnife  = hasKnifeInInventory()
 
-    if not showBtn then
-        cachedScreenGui.Enabled = false
-        return
-    end
-
-    if smartVis then
-        cachedScreenGui.Enabled = hasKnife
-    else
-        cachedScreenGui.Enabled = true
-    end
+    if not showBtn then cachedScreenGui.Enabled = false; return end
+    if smartVis then cachedScreenGui.Enabled = hasKnife else cachedScreenGui.Enabled = true end
 end
 
--- UI Setup (KillerHub MurderTab)
+-- ============================================================================
+-- UI SETUP
+-- ============================================================================
 local MurderTab = KillerHub:CreateTab("Murder", "rbxassetid://104386785713574")
 
 MurderTab:CreateSection("Knife Combats")
-MurderTab:CreateToggle("KnifeAimActive", "Knife Thrown aim", function(state) end)
-MurderTab:CreateDropdown("KnifeAimType", "Type of throw aim", {"Target FOV", "Nearest Player"}, function(selected) end)
-MurderTab:CreateToggle("PrioritizeSheriffActive", "Prioritize Sheriff", function(state) end)
-MurderTab:CreateToggle("KnifeWallCheckActive", "Wall Check", function(state) end)
+MurderTab:CreateToggle("KnifeAimActive", "Knife Thrown aim", function() end)
+MurderTab:CreateDropdown("KnifeAimType", "Type of throw aim", {"Target FOV", "Nearest Player"}, function() end)
+MurderTab:CreateToggle("PrioritizeSheriffActive", "Prioritize Sheriff", function() end)
+MurderTab:CreateToggle("KnifeWallCheckActive", "Wall Check", function() end)
 
-MurderTab:CreateDropdown("KnifeThrowType", "Knife throwing type", {"Normal", "Fast"}, function(selected) end)
-MurderTab:CreateSlider("KnifeThrowDistance", "Throw Advance Distance", 0, 100, function(value) end)
+MurderTab:CreateDropdown("KnifeThrowType", "Knife throwing type", {"Normal", "Fast"}, function() end)
+MurderTab:CreateSlider("KnifeThrowDistance", "Throw Advance Distance", 0, 100, function() end)
 
-MurderTab:CreateSlider("KnifeHorizSlider", "Horizontal prediction", 0, 300, function(value) end)
-MurderTab:CreateSlider("KnifeVertSlider", "Vertical prediction", 0, 120, function(value) end)
+MurderTab:CreateSlider("KnifeHorizSlider", "Horizontal prediction", 0, 300, function() end)
+MurderTab:CreateSlider("KnifeVertSlider", "Vertical prediction", 0, 120, function() end)
 
 MurderTab:CreateSection("Interface & Thrown Button")
 MurderTab:CreateToggle("Murder_ShowButton", "Show Thrown Button (Blatant)", function() checkWeaponVisibility() end)
 MurderTab:CreateToggle("Murder_LockBtnPos", "Lock Button Position", function() end)
 MurderTab:CreateSlider("Murder_BtnSize", "Button Size", 50, 200, function(val)
-    if cachedShootButton then
-        cachedShootButton.Size = UDim2.new(0, val, 0, val)
-    end
+    if cachedShootButton then cachedShootButton.Size = udim2New(0, val, 0, val) end
 end, 95)
 MurderTab:CreateKeybind("Murder_ThrownKey", "Thrown Keybind (Blatant)", Enum.KeyCode.F, function()
     executeInstantThrow()
 end)
 
 MurderTab:CreateSection("Stab Hitbox Modifier")
-MurderTab:CreateToggle("StabHitboxMaster", "Stab Hitbox", function(state) end)
-MurderTab:CreateToggle("SeeHitboxActive", "See hitbox", function(state) end)
-MurderTab:CreateSlider("HitboxSizeSlider", "Stab Hitbox Size", 2, 30, function(value) end)
-MurderTab:CreateSlider("HitboxTransparencySlider", "Hitbox transparency", 0, 100, function(value) end)
+MurderTab:CreateToggle("StabHitboxMaster", "Stab Hitbox", function() end)
+MurderTab:CreateToggle("SeeHitboxActive", "See hitbox", function() end)
+MurderTab:CreateSlider("HitboxSizeSlider", "Stab Hitbox Size", 2, 30, function() end)
+MurderTab:CreateSlider("HitboxTransparencySlider", "Hitbox transparency", 0, 100, function() end)
 
-MurderTab:CreateDropdown("HitboxMaterialDropdown", "Hitbox Material", 
-    {"Plastic", "SmoothPlastic", "Metal", "DiamondPlate", "Glass", "Neon", "ForceField", "Wood"}, 
-    function(selected) end
-)
+MurderTab:CreateDropdown("HitboxMaterialDropdown", "Hitbox Material",
+    {"Plastic", "SmoothPlastic", "Metal", "DiamondPlate", "Glass", "Neon", "ForceField", "Wood"},
+    function() end)
+MurderTab:CreateHint("El hitbox ya NO modifica el HumanoidRootPart para no romper el Sheriff Suite.")
 
 MurderTab:CreateSection("Visuals & Environment")
-MurderTab:CreateToggle("ShowKnifePredictionVisual", "See prediction", function(state) end)
-MurderTab:CreateToggle("ShowKnifeTracerVisual", "See prediction tracer", function(state) end)
-MurderTab:CreateToggle("SmartHandVisibility", "Smart Visibility", function(state) checkWeaponVisibility() end)
+MurderTab:CreateToggle("ShowKnifePredictionVisual", "See prediction", function() end)
+MurderTab:CreateToggle("ShowKnifeTracerVisual", "See prediction tracer", function() end)
+MurderTab:CreateToggle("SmartHandVisibility", "Smart Visibility", function() checkWeaponVisibility() end)
 
 MurderTab:CreateSection("Modify FOV")
-MurderTab:CreateToggleColorPicker("FovVisibleMurder", "FovColorMurder", "Show FOV Circle", Color3.fromRGB(0, 255, 185), function(state) end, function(color) end)
-MurderTab:CreateSlider("FovRadiusMurder", "FOV Radius", 30, 600, function(value) end)
+MurderTab:CreateToggleColorPicker("FovVisibleMurder", "FovColorMurder", "Show FOV Circle",
+    color3RGB(0, 255, 185), function() end, function() end)
+MurderTab:CreateSlider("FovRadiusMurder", "FOV Radius", 30, 600, function() end)
 
--- LOOPS OPTIMIZADOS
+-- ============================================================================
+-- LOOP DE VISIBILIDAD DEL BOTÓN
+-- ============================================================================
 local visCheckTask = task.spawn(function()
-    while task.wait(0.2) do
-        pcall(checkWeaponVisibility)
-    end
+    while task.wait(0.2) do pcall(checkWeaponVisibility) end
 end)
 KillerHub:AddTask(visCheckTask)
 
+-- ============================================================================
+-- HELPERS DE HITBOX (SIN TOCAR HumanoidRootPart)
+-- ============================================================================
+local function applyHitboxToCharacter(targetChar, targetSize, targetTransparency, matEnum, seeHitbox)
+    if not originalPartData[targetChar] then originalPartData[targetChar] = {} end
+    local saved = originalPartData[targetChar]
+
+    for i = 1, #HITBOX_PART_NAMES do
+        local partName = HITBOX_PART_NAMES[i]
+        local part = targetChar:FindFirstChild(partName)
+        if part then
+            -- Guardamos el tamaño/material original la primera vez
+            if not saved[partName] then
+                saved[partName] = { size = part.Size, material = part.Material }
+            end
+            if part.Size ~= targetSize then part.Size = targetSize end
+            if part.CanCollide then part.CanCollide = false end
+
+            if seeHitbox then
+                if part.Transparency ~= targetTransparency then part.Transparency = targetTransparency end
+                if part.Material ~= matEnum then part.Material = matEnum end
+            else
+                if part.Transparency ~= 1 then part.Transparency = 1 end
+            end
+        end
+    end
+end
+
+local function restoreHitboxOnCharacter(targetChar)
+    local saved = originalPartData[targetChar]
+    if not saved then return end
+
+    for i = 1, #HITBOX_PART_NAMES do
+        local partName = HITBOX_PART_NAMES[i]
+        local part = targetChar:FindFirstChild(partName)
+        local orig = saved[partName]
+        if part and orig then
+            part.Size = orig.size
+            part.Material = orig.material
+            part.Transparency = 1
+        end
+    end
+    originalPartData[targetChar] = nil
+end
+
+-- ============================================================================
+-- HEARTBEAT: física + hitbox + selección de objetivo
+-- ============================================================================
 local hbConn = RunService.Heartbeat:Connect(function()
     local silentAimActive = GetFlag("KnifeAimActive", false)
-    local hitboxActive = GetFlag("StabHitboxMaster", false)
-    local smartVis = GetFlag("SmartHandVisibility", false)
-    local hasKnife = hasKnifeInInventory()
+    local hitboxActive    = GetFlag("StabHitboxMaster", false)
+    local smartVis        = GetFlag("SmartHandVisibility", false)
+    local hasKnife        = hasKnifeInInventory()
 
     local shouldRunAimLogic = silentAimActive and (not smartVis or hasKnife)
 
@@ -742,19 +916,14 @@ local hbConn = RunService.Heartbeat:Connect(function()
         cachedTarget = nil
     end
 
+    -- Restaurar hitbox si se apagó
     if not hitboxActive and wasHitboxActive then
         wasHitboxActive = false
         local allPlayers = Players:GetPlayers()
         for i = 1, #allPlayers do
             local player = allPlayers[i]
             if player ~= LocalPlayer and player.Character then
-                local hrp = player.Character:FindFirstChild("HumanoidRootPart")
-                if hrp then
-                    hrp.Size = Vector3.new(2, 2, 1)
-                    hrp.Transparency = 1
-                    hrp.Material = Enum.Material.Plastic
-                    hrp.CanQuery = true -- Restaura detección normal al apagar hitbox
-                end
+                restoreHitboxOnCharacter(player.Character)
             end
         end
     end
@@ -762,83 +931,83 @@ local hbConn = RunService.Heartbeat:Connect(function()
     if not shouldRunAimLogic and not hitboxActive then return end
     if hitboxActive then wasHitboxActive = true end
 
-    local currentTime = os.clock()
+    local currentTime = os_clock()
     local seeHitbox = GetFlag("SeeHitboxActive", false)
     local hitboxSize = GetFlag("HitboxSizeSlider", 2)
     local transSlider = GetFlag("HitboxTransparencySlider", 0)
-    local targetTransparency = math.clamp(transSlider, 0, 100) / 100
+    local targetTransparency = math_clamp(transSlider, 0, 100) / 100
     local matEnum = getMaterialEnum(GetFlag("HitboxMaterialDropdown", "Plastic"))
-    local targetSize = Vector3.new(hitboxSize, hitboxSize, hitboxSize)
+    local targetSize = vec3New(hitboxSize, hitboxSize, hitboxSize)
     local allPlayers = Players:GetPlayers()
 
     for i = 1, #allPlayers do
         local player = allPlayers[i]
         if player ~= LocalPlayer and player.Character then
             local hrp = player.Character:FindFirstChild("HumanoidRootPart")
-            
-            if hrp then
-                if hitboxActive then
-                    if hrp.Size ~= targetSize then hrp.Size = targetSize end
-                    if hrp.CanCollide then hrp.CanCollide = false end
-                    if hrp.CanQuery then hrp.CanQuery = false end -- EVITA INTERFERENCIA CON APUNTADO Y RAYCASTS
 
-                    if seeHitbox then
-                        if hrp.Transparency ~= targetTransparency then hrp.Transparency = targetTransparency end
-                        if hrp.Material ~= matEnum then hrp.Material = matEnum end
-                    else
-                        if hrp.Transparency ~= 1 then hrp.Transparency = 1 end
-                    end
+            if hrp then
+                -- Aplicar hitbox (excluye HRP)
+                if hitboxActive then
+                    applyHitboxToCharacter(player.Character, targetSize, targetTransparency, matEnum, seeHitbox)
                 end
 
+                -- Física para predicción
                 if shouldRunAimLogic then
                     local currentPos = hrp.Position
                     local physicsVelocity = hrp.AssemblyLinearVelocity
-                    
+
                     if not playerFysics[player] then
-                        playerFysics[player] = { 
-                            LastPos = currentPos, 
-                            LastTime = currentTime, 
-                            SmoothedVelocity = physicsVelocity, 
+                        playerFysics[player] = {
+                            LastPos = currentPos,
+                            LastTime = currentTime,
+                            SmoothedVelocity = physicsVelocity,
                             LastVelocity = physicsVelocity,
                             LastRawVelocity = physicsVelocity,
                             ConsecutiveSameVelocity = 0,
-                            IsLaggingOut = false
+                            IsLaggingOut = false,
+                            Samples = {}
                         }
-                    else
-                        local data = playerFysics[player]
-                        local deltaTime = currentTime - data.LastTime
-                        
-                        if deltaTime > 0 then
-                            local positionalVelocity = (currentPos - data.LastPos) / deltaTime
-                            local realVelocity = Vector3.new(physicsVelocity.X, positionalVelocity.Y, physicsVelocity.Z)
-                            
-                            local diffVel = realVelocity - data.LastRawVelocity
-                            if data.LastRawVelocity and diffVel:Dot(diffVel) < 0.000001 then
-                                data.ConsecutiveSameVelocity = data.ConsecutiveSameVelocity + 1
-                            else
-                                data.ConsecutiveSameVelocity = 0
-                            end
-                            
-                            data.LastRawVelocity = realVelocity
-                            
-                            if data.ConsecutiveSameVelocity > 20 and realVelocity:Dot(realVelocity) > 1 then
-                                data.IsLaggingOut = true
-                                realVelocity = Vector3.new(0, 0, 0)
-                            else
-                                data.IsLaggingOut = false
-                            end
-                            
-                            if positionalVelocity:Dot(positionalVelocity) > 3025 then 
-                                realVelocity = Vector3.new(0, 0, 0) 
-                            end
-                            
-                            data.LastVelocity = data.SmoothedVelocity
-                            data.SmoothedVelocity = data.SmoothedVelocity:Lerp(realVelocity, 0.20)
-                        end
-                        
-                        data.LastPos = currentPos
-                        data.LastTime = currentTime
                     end
+
+                    local data = playerFysics[player]
+                    local deltaTime = currentTime - data.LastTime
+
+                    if deltaTime > 0 then
+                        local positionalVelocity = (currentPos - data.LastPos) / deltaTime
+                        local realVelocity = vec3New(physicsVelocity.X, positionalVelocity.Y, physicsVelocity.Z)
+
+                        -- Detección de lag (velocidad repetida)
+                        local diffVel = realVelocity - data.LastRawVelocity
+                        if diffVel:Dot(diffVel) < 0.000001 then
+                            data.ConsecutiveSameVelocity = data.ConsecutiveSameVelocity + 1
+                        else
+                            data.ConsecutiveSameVelocity = 0
+                        end
+                        data.LastRawVelocity = realVelocity
+
+                        if data.ConsecutiveSameVelocity > 20 and realVelocity:Dot(realVelocity) > 1 then
+                            data.IsLaggingOut = true
+                            realVelocity = VECTOR_ZERO
+                        else
+                            data.IsLaggingOut = false
+                        end
+
+                        -- Teleport detection
+                        if positionalVelocity:Dot(positionalVelocity) > 3025 then
+                            realVelocity = VECTOR_ZERO
+                        end
+
+                        data.LastVelocity = data.SmoothedVelocity
+                        data.SmoothedVelocity = data.SmoothedVelocity:Lerp(realVelocity, 0.20)
+                    end
+
+                    -- Multi-sample para anti-jukes
+                    local samples = data.Samples
+                    samples[#samples + 1] = { pos = currentPos, t = currentTime }
+                    if #samples > 4 then table.remove(samples, 1) end
+
+                    data.LastPos = currentPos
+                    data.LastTime = currentTime
                 end
             end
         end
@@ -846,6 +1015,9 @@ local hbConn = RunService.Heartbeat:Connect(function()
 end)
 KillerHub:AddTask(hbConn)
 
+-- ============================================================================
+-- RENDER STEPPED: visuales
+-- ============================================================================
 local rsConn = RunService.RenderStepped:Connect(function()
     local silentAimActive = GetFlag("KnifeAimActive", false)
 
@@ -875,7 +1047,7 @@ local rsConn = RunService.RenderStepped:Connect(function()
         FOVCircle.Position = cachedScreenCenter
         FOVCircle.Radius = GetFlag("FovRadiusMurder", 150) * cachedDpiScale
         FOVCircle.Thickness = 0.8 * cachedDpiScale
-        FOVCircle.Color = GetFlag("FovColorMurder", Color3.fromRGB(0, 255, 185))
+        FOVCircle.Color = GetFlag("FovColorMurder", color3RGB(0, 255, 185))
         FOVCircle.Visible = true
     else
         FOVCircle.Visible = false
@@ -889,14 +1061,14 @@ local rsConn = RunService.RenderStepped:Connect(function()
         if basePos and rawPredictedPos then
             lastActualPosition = lastActualPosition:Lerp(basePos, 0.28)
             lastVisualPosition = lastVisualPosition:Lerp(rawPredictedPos, 0.28)
-            
+
             local screenPosBase, onScreenBase = Camera:WorldToViewportPoint(lastActualPosition)
             local screenPosPred, onScreenPred = Camera:WorldToViewportPoint(lastVisualPosition)
-            
+
             if onScreenBase and onScreenPred then
-                local drawBase = Vector2.new(screenPosBase.X, screenPosBase.Y)
-                local drawPred = Vector2.new(screenPosPred.X, screenPosPred.Y)
-                
+                local drawBase = vec2New(screenPosBase.X, screenPosBase.Y)
+                local drawPred = vec2New(screenPosPred.X, screenPosPred.Y)
+
                 PredDotCenter.Radius = 2.5 * cachedDpiScale
                 PredDotCenter.Thickness = 1 * cachedDpiScale
                 PredRingOuter.Radius = 6.0 * cachedDpiScale
@@ -907,7 +1079,7 @@ local rsConn = RunService.RenderStepped:Connect(function()
                 PredRingOuter.Position = drawPred
                 PredLine.From = drawBase
                 PredLine.To = drawPred
-                
+
                 local lineDiff = drawBase - drawPred
                 PredLine.Visible = lineDiff:Dot(lineDiff) >= (2.25 * cachedDpiScale * cachedDpiScale)
                 PredDotCenter.Visible = true
@@ -937,15 +1109,16 @@ local rsConn = RunService.RenderStepped:Connect(function()
 
             local char = LocalPlayer.Character
             local rightHand = char and (char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm"))
-            local originWorld = rightHand and rightHand.Position or (char and char:FindFirstChild("HumanoidRootPart") and char.HumanoidRootPart.Position)
+            local originWorld = rightHand and rightHand.Position
+                or (char and char:FindFirstChild("HumanoidRootPart") and char.HumanoidRootPart.Position)
 
             if originWorld then
                 local screenHand, onScreenHand = Camera:WorldToViewportPoint(originWorld)
                 local screenPred, onScreenPred = Camera:WorldToViewportPoint(lastTracerPosition)
 
                 if onScreenHand or onScreenPred then
-                    TracerLine.From = Vector2.new(screenHand.X, screenHand.Y)
-                    TracerLine.To = Vector2.new(screenPred.X, screenPred.Y)
+                    TracerLine.From = vec2New(screenHand.X, screenHand.Y)
+                    TracerLine.To = vec2New(screenPred.X, screenPred.Y)
                     TracerLine.Thickness = 1.0 * cachedDpiScale
                     TracerLine.Visible = true
                 else
@@ -967,39 +1140,43 @@ local rsConn = RunService.RenderStepped:Connect(function()
 end)
 KillerHub:AddTask(rsConn)
 
--- Hooks para Silent Aim
+-- ============================================================================
+-- HOOKS DE SILENT AIM
+-- ============================================================================
 local ClientServices = ReplicatedStorage:WaitForChild("ClientServices", 5)
 if ClientServices then
-    local WeaponService = require(ClientServices:WaitForChild("WeaponService"))
-    local oldGetTargetPosition = WeaponService.GetTargetPosition
-    local oldGetMouseTargetCFrame = WeaponService.GetMouseTargetCFrame
+    local ok, WeaponService = pcall(function()
+        return require(ClientServices:WaitForChild("WeaponService"))
+    end)
+    if ok and WeaponService then
+        local oldGetTargetPosition = WeaponService.GetTargetPosition
+        local oldGetMouseTargetCFrame = WeaponService.GetMouseTargetCFrame
 
-    WeaponService.GetTargetPosition = function(self, ...)
-        local silentAim = GetFlag("KnifeAimActive", false)
-        if silentAim and hasKnifeInInventory() then
-            local targetPlayer = cachedTarget or getClosestTargetToFOV()
-            if targetPlayer and targetPlayer.Character then
-                local _, predictedPos = getAdvancedKnifePrediction(targetPlayer.Character)
-                if predictedPos then return CFrame.new(predictedPos) end
+        WeaponService.GetTargetPosition = function(self, ...)
+            if GetFlag("KnifeAimActive", false) and hasKnifeInInventory() then
+                local targetPlayer = cachedTarget or getClosestTargetToFOV()
+                if targetPlayer and targetPlayer.Character then
+                    local _, predictedPos = getAdvancedKnifePrediction(targetPlayer.Character)
+                    if predictedPos then return cframeNew(predictedPos) end
+                end
             end
+            return oldGetTargetPosition(self, ...)
         end
-        return oldGetTargetPosition(self, ...)
-    end
 
-    WeaponService.GetMouseTargetCFrame = function(self, ...)
-        local silentAim = GetFlag("KnifeAimActive", false)
-        if silentAim and hasKnifeInInventory() then
-            local targetPlayer = cachedTarget or getClosestTargetToFOV()
-            if targetPlayer and targetPlayer.Character then
-                local _, predictedPos = getAdvancedKnifePrediction(targetPlayer.Character)
-                if predictedPos then return CFrame.new(predictedPos) end
+        WeaponService.GetMouseTargetCFrame = function(self, ...)
+            if GetFlag("KnifeAimActive", false) and hasKnifeInInventory() then
+                local targetPlayer = cachedTarget or getClosestTargetToFOV()
+                if targetPlayer and targetPlayer.Character then
+                    local _, predictedPos = getAdvancedKnifePrediction(targetPlayer.Character)
+                    if predictedPos then return cframeNew(predictedPos) end
+                end
             end
+            return oldGetMouseTargetCFrame(self, ...)
         end
-        return oldGetMouseTargetCFrame(self, ...)
     end
 end
 
--- Namecall hook
+-- Namecall hook para Fast Throw
 local rawNamecall
 rawNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
     local method = getnamecallmethod()
@@ -1008,21 +1185,19 @@ rawNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
     if not checkcaller() and method == "FireServer" and self.Name == "KnifeThrown" then
         local throwType = GetFlag("KnifeThrowType", "Normal")
         local throwDistConfig = GetFlag("KnifeThrowDistance", 14)
-        
-        if throwType == "Fast" and throwDistConfig > 0 and #args >= 2 and typeof(args[1]) == "CFrame" and typeof(args[2]) == "CFrame" then
+
+        if throwType == "Fast" and throwDistConfig > 0 and #args >= 2
+           and typeof(args[1]) == "CFrame" and typeof(args[2]) == "CFrame" then
             local originCF = args[1]
             local targetCF = args[2]
-            
-            local direction = (targetCF.Position - originCF.Position)
+            local direction = targetCF.Position - originCF.Position
             local dist = direction.Magnitude
-            
+
             if dist > 0 then
-                local lookDir = direction.Unit
-                local advanceDistance = math.min(throwDistConfig, dist * 0.75)
-                
-                args[1] = originCF + (lookDir * advanceDistance)
+                local advanceDistance = math_min(throwDistConfig, dist * 0.75)
+                args[1] = originCF + (direction.Unit * advanceDistance)
             end
-            
+
             return rawNamecall(self, unpack(args))
         end
     end
