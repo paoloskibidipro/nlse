@@ -1,6 +1,6 @@
 -- ============================================================================
--- 👻 KILLER HUB | MURDER SUITE V10.1
--- Wall-Aware Prediction • Anti-Jukes • Ballistic Fall • Sheriff-Safe Hitbox
+-- 👻 KILLER HUB | MURDER SUITE V10.2
+-- Wall-Aware Prediction • Anti-Jukes • Ballistic Fall (Smooth) • Sheriff-Safe Hitbox
 -- ============================================================================
 
 if getgenv().__KillerHub_MurderSuite_Loaded then
@@ -11,7 +11,7 @@ if getgenv().__KillerHub_MurderSuite_Loaded then
 end
 getgenv().__KillerHub_MurderSuite_Loaded = true
 
-local KillerHub = loadstring(game:HttpGet("https://raw.githubusercontent.com/paoloskibidipro/s-eee-ri/refs/heads/main/Slayer.lua"))()
+local KillerHub = loadstring(game:HttpGet("https://raw.githubusercontent.com/Salayer09/KillerHub2/main/Sheriff.lua"))()
 
 local Players          = game:GetService("Players")
 local LocalPlayer      = Players.LocalPlayer
@@ -402,7 +402,12 @@ local function clampPredictionForWalls(originPos, targetPos, predictedPos, targe
     return predictedPos
 end
 
--- MOTOR DE PREDICCIÓN V10.1
+-- ============================================================================
+-- MOTOR DE PREDICCIÓN V10.2
+--   • Fall prediction suavizada (gravity dampening + cap por distancia)
+--   • Considera Fast Mode para el tiempo efectivo de vuelo
+--   • Jump prediction sin cambios (ya estaba bien)
+-- ============================================================================
 local function getAdvancedKnifePrediction(targetChar)
     if not targetChar then return nil, nil end
     local hrp = targetChar:FindFirstChild("HumanoidRootPart")
@@ -439,6 +444,15 @@ local function getAdvancedKnifePrediction(targetChar)
     end
     local ping = math_clamp(rawPing, 0.01, 0.25)
     local travelTime = (distance / 85) + ping
+
+    -- Tiempo efectivo considerando el avance del origen en Fast mode
+    local throwTypeNow  = GetFlag("KnifeThrowType", "Normal")
+    local throwDistNow  = GetFlag("KnifeThrowDistance", 14)
+    local effectiveDistance = distance
+    if throwTypeNow == "Fast" and throwDistNow > 0 then
+        effectiveDistance = math_max(distance - math_min(throwDistNow, distance * 0.75), distance * 0.25)
+    end
+    local effectiveTravelTime = (effectiveDistance / 85) + ping
 
     local horizontalVelocity = vec3New(smoothVelocity.X, 0, smoothVelocity.Z)
     local exactSpeed = horizontalVelocity.Magnitude
@@ -481,33 +495,44 @@ local function getAdvancedKnifePrediction(targetChar)
         local verticalDistanceScale = 1 / (1 + (distance * 0.005))
 
         if verticalVelocity < -0.5 then
+            -- ================= FALL PREDICTION V10.2 (smooth) =================
             table.clear(wallFilterTable)
             wallFilterTable[1] = targetChar
             wallFilterTable[2] = LocalPlayer.Character
             wallFilterTable[3] = Camera
             raycastParams.FilterDescendantsInstances = wallFilterTable
 
-            local floorRay = workspace:Raycast(targetPosition, vec3New(0, -50, 0), raycastParams)
             local v0 = math_abs(verticalVelocity)
+            local floorRay = workspace:Raycast(targetPosition, vec3New(0, -50, 0), raycastParams)
 
+            -- Componente lineal (similar al salto, pero hacia abajo)
+            -- Usamos effectiveTravelTime para no sobre-predecir en Fast mode
+            local fallScale = (vPredConfig * 4.5) * effectiveTravelTime * verticalDistanceScale
+            local linearFall = v0 * fallScale
+
+            -- Componente de gravedad fuertemente amortiguada (28% + cap relativo)
+            local gravityFall = 0.5 * GRAVITY * fallScale * fallScale
+            gravityFall = math_min(gravityFall * 0.28, v0 * 0.6)
+
+            local totalFall = linearFall + gravityFall
+
+            -- Protección contra el piso (nunca por debajo de floor + 1.5)
             if floorRay then
                 local h = targetPosition.Y - floorRay.Position.Y
                 if h > 0.1 then
-                    local tFall = (v0 + math_sqrt(v0 * v0 + 2 * GRAVITY * h)) / GRAVITY
-                    local desiredT = (vPredConfig * 5.8) * travelTime * verticalDistanceScale
-                    local t = math_min(desiredT, tFall * 0.92)
-                    local yOffset = -(v0 * t + 0.5 * GRAVITY * t * t)
-                    local maxDrop = h - 1.0
-                    if maxDrop < 0 then maxDrop = 0 end
-                    if yOffset < -maxDrop then yOffset = -maxDrop end
-                    verticalOffset = vec3New(0, yOffset, 0)
+                    local maxDrop = math_max(0, h - 1.5)
+                    totalFall = math_min(totalFall, maxDrop)
                 end
             else
-                local calculatedYOffset = verticalVelocity * 0.32
-                    * (vPredConfig * 5.8) * travelTime * verticalDistanceScale
-                verticalOffset = vec3New(0, math_max(calculatedYOffset, -20), 0)
+                totalFall = math_min(totalFall, 15)
             end
+
+            -- Cap suave por distancia (nunca más del 18% del tiro)
+            totalFall = math_min(totalFall, distance * 0.18)
+
+            verticalOffset = vec3New(0, -totalFall, 0)
         else
+            -- ================= JUMP PREDICTION (sin cambios) =================
             local calculatedYOffset = verticalVelocity * 0.70
                 * (vPredConfig * 5.8) * travelTime * verticalDistanceScale
             verticalOffset = vec3New(0, calculatedYOffset, 0)
@@ -764,13 +789,12 @@ end)
 KillerHub:AddTask(visCheckTask)
 
 -- ============================================================================
--- HITBOX (V10.1): HRP XZ ancho + visual separado + restaurar TODO
+-- HITBOX (V10.2): HRP XZ ancho + visual separado + restaurar TODO
 -- ============================================================================
 local function applyHitboxToCharacter(targetChar, targetSize, targetTransparency, matEnum, seeHitbox)
     local hrp = targetChar:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
 
-    -- Guardar datos originales del HRP la primera vez
     if not hrpOriginalData[hrp] then
         hrpOriginalData[hrp] = {
             size = hrp.Size,
@@ -787,7 +811,6 @@ local function applyHitboxToCharacter(targetChar, targetSize, targetTransparency
     if hrp.CanCollide then hrp.CanCollide = false end
     -- NO tocamos la transparencia del HRP (ya está invisible en MM2)
 
-    -- Parte visual separada (cubo perfecto)
     local visualPart = targetChar:FindFirstChild(VISUAL_PART_NAME)
     if seeHitbox then
         if not visualPart then
@@ -828,11 +851,6 @@ local function restoreHitboxOnCharacter(targetChar)
     local visualPart = targetChar:FindFirstChild(VISUAL_PART_NAME)
     if visualPart then visualPart:Destroy() end
 end
-
--- Auto-restaurar cuando un HRP se destruye
-LocalPlayer.CharacterAdded:Connect(function()
-    -- Resetear el cache por si quedaron entries huérfanas
-end)
 
 -- ============================================================================
 -- HEARTBEAT
@@ -944,7 +962,7 @@ end)
 KillerHub:AddTask(hbConn)
 
 -- ============================================================================
--- RENDER STEPPED
+-- RENDER STEPPED (V10.2 - predicción cacheada, un solo cómputo por frame)
 -- ============================================================================
 local rsConn = RunService.RenderStepped:Connect(function()
     local silentAimActive = GetFlag("KnifeAimActive", false)
@@ -980,33 +998,37 @@ local rsConn = RunService.RenderStepped:Connect(function()
     end
 
     local activeTarget = cachedTarget
-    local showPred = GetFlag("ShowKnifePredictionVisual", false)
-    if showPred and activeTarget and activeTarget.Character then
-        local basePos, rawPredictedPos = getAdvancedKnifePrediction(activeTarget.Character)
-        if basePos and rawPredictedPos then
-            lastActualPosition = lastActualPosition:Lerp(basePos, 0.28)
-            lastVisualPosition = lastVisualPosition:Lerp(rawPredictedPos, 0.28)
-            local screenPosBase, onScreenBase = Camera:WorldToViewportPoint(lastActualPosition)
-            local screenPosPred, onScreenPred = Camera:WorldToViewportPoint(lastVisualPosition)
-            if onScreenBase and onScreenPred then
-                local drawBase = vec2New(screenPosBase.X, screenPosBase.Y)
-                local drawPred = vec2New(screenPosPred.X, screenPosPred.Y)
-                PredDotCenter.Radius = 2.5 * cachedDpiScale
-                PredDotCenter.Thickness = 1 * cachedDpiScale
-                PredRingOuter.Radius = 6.0 * cachedDpiScale
-                PredRingOuter.Thickness = 1.2 * cachedDpiScale
-                PredLine.Thickness = 1.0 * cachedDpiScale
-                PredDotCenter.Position = drawBase
-                PredRingOuter.Position = drawPred
-                PredLine.From = drawBase
-                PredLine.To = drawPred
-                local lineDiff = drawBase - drawPred
-                PredLine.Visible = lineDiff:Dot(lineDiff) >= (2.25 * cachedDpiScale * cachedDpiScale)
-                PredDotCenter.Visible = true
-                PredRingOuter.Visible = true
-            else
-                PredDotCenter.Visible = false; PredRingOuter.Visible = false; PredLine.Visible = false
-            end
+    local showPred   = GetFlag("ShowKnifePredictionVisual", false)
+    local showTracer = GetFlag("ShowKnifeTracerVisual", false)
+
+    -- 🚀 Optimización: calcular la predicción UNA sola vez y reutilizarla
+    -- para el visual de predicción y para el tracer.
+    local basePos, rawPredictedPos
+    if (showPred or showTracer) and activeTarget and activeTarget.Character then
+        basePos, rawPredictedPos = getAdvancedKnifePrediction(activeTarget.Character)
+    end
+
+    if showPred and basePos and rawPredictedPos then
+        lastActualPosition = lastActualPosition:Lerp(basePos, 0.28)
+        lastVisualPosition = lastVisualPosition:Lerp(rawPredictedPos, 0.28)
+        local screenPosBase, onScreenBase = Camera:WorldToViewportPoint(lastActualPosition)
+        local screenPosPred, onScreenPred = Camera:WorldToViewportPoint(lastVisualPosition)
+        if onScreenBase and onScreenPred then
+            local drawBase = vec2New(screenPosBase.X, screenPosBase.Y)
+            local drawPred = vec2New(screenPosPred.X, screenPosPred.Y)
+            PredDotCenter.Radius = 2.5 * cachedDpiScale
+            PredDotCenter.Thickness = 1 * cachedDpiScale
+            PredRingOuter.Radius = 6.0 * cachedDpiScale
+            PredRingOuter.Thickness = 1.2 * cachedDpiScale
+            PredLine.Thickness = 1.0 * cachedDpiScale
+            PredDotCenter.Position = drawBase
+            PredRingOuter.Position = drawPred
+            PredLine.From = drawBase
+            PredLine.To = drawPred
+            local lineDiff = drawBase - drawPred
+            PredLine.Visible = lineDiff:Dot(lineDiff) >= (2.25 * cachedDpiScale * cachedDpiScale)
+            PredDotCenter.Visible = true
+            PredRingOuter.Visible = true
         else
             PredDotCenter.Visible = false; PredRingOuter.Visible = false; PredLine.Visible = false
         end
@@ -1021,24 +1043,20 @@ local rsConn = RunService.RenderStepped:Connect(function()
         end
     end
 
-    local showTracer = GetFlag("ShowKnifeTracerVisual", false)
-    if showTracer and activeTarget and activeTarget.Character then
-        local _, rawPredictedPos = getAdvancedKnifePrediction(activeTarget.Character)
-        if rawPredictedPos then
-            lastTracerPosition = lastTracerPosition:Lerp(rawPredictedPos, 0.80)
-            local char = LocalPlayer.Character
-            local rightHand = char and (char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm"))
-            local originWorld = rightHand and rightHand.Position
-                or (char and char:FindFirstChild("HumanoidRootPart") and char.HumanoidRootPart.Position)
-            if originWorld then
-                local screenHand, onScreenHand = Camera:WorldToViewportPoint(originWorld)
-                local screenPred, onScreenPred = Camera:WorldToViewportPoint(lastTracerPosition)
-                if onScreenHand or onScreenPred then
-                    TracerLine.From = vec2New(screenHand.X, screenHand.Y)
-                    TracerLine.To = vec2New(screenPred.X, screenPred.Y)
-                    TracerLine.Thickness = 1.0 * cachedDpiScale
-                    TracerLine.Visible = true
-                else TracerLine.Visible = false end
+    if showTracer and rawPredictedPos then
+        lastTracerPosition = lastTracerPosition:Lerp(rawPredictedPos, 0.80)
+        local char = LocalPlayer.Character
+        local rightHand = char and (char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm"))
+        local originWorld = rightHand and rightHand.Position
+            or (char and char:FindFirstChild("HumanoidRootPart") and char.HumanoidRootPart.Position)
+        if originWorld then
+            local screenHand, onScreenHand = Camera:WorldToViewportPoint(originWorld)
+            local screenPred, onScreenPred = Camera:WorldToViewportPoint(lastTracerPosition)
+            if onScreenHand or onScreenPred then
+                TracerLine.From = vec2New(screenHand.X, screenHand.Y)
+                TracerLine.To = vec2New(screenPred.X, screenPred.Y)
+                TracerLine.Thickness = 1.0 * cachedDpiScale
+                TracerLine.Visible = true
             else TracerLine.Visible = false end
         else TracerLine.Visible = false end
     else
