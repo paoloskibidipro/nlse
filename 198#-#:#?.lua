@@ -1,6 +1,7 @@
 -- ============================================================================
--- 👻 KILLER HUB | MURDER SUITE V10.2
--- Wall-Aware Prediction • Anti-Jukes • Ballistic Fall (Smooth) • Sheriff-Safe Hitbox
+-- 👻 KILLER HUB | MURDER SUITE V10.3
+-- Wall-Aware Prediction • Anti-Jukes • Ballistic Fall (Smooth) • Sheriff-Safe
+-- Hitbox • Kill All (remote-based, invisible)
 -- ============================================================================
 
 if getgenv().__KillerHub_MurderSuite_Loaded then
@@ -11,7 +12,7 @@ if getgenv().__KillerHub_MurderSuite_Loaded then
 end
 getgenv().__KillerHub_MurderSuite_Loaded = true
 
-local KillerHub = loadstring(game:HttpGet("https://raw.githubusercontent.com/Salayer09/KillerHub2/main/Sheriff.lua"))()
+local KillerHub = loadstring(game:HttpGet("https://raw.githubusercontent.com/paoloskibidipro/s-eee-ri/refs/heads/main/Slayer.lua"))()
 
 local Players          = game:GetService("Players")
 local LocalPlayer      = Players.LocalPlayer
@@ -65,10 +66,11 @@ end
 -- Constants
 local MAX_DISTANCE_SQ  = 1822500
 local GRAVITY          = workspace.Gravity > 0 and workspace.Gravity or 196.2
+local KILLALL_COOLDOWN = 1.5
 local wallFilterTable  = {}
 local partsToCheck     = {nil, nil}
 local playerFysics     = setmetatable({}, { __mode = "k" })
-local hrpOriginalData  = setmetatable({}, { __mode = "k" })   -- guarda {size, transparency, material} por HRP
+local hrpOriginalData  = setmetatable({}, { __mode = "k" })
 local lastVisualPosition= VECTOR_ZERO
 local lastActualPosition= VECTOR_ZERO
 local lastTracerPosition= VECTOR_ZERO
@@ -76,6 +78,7 @@ local cachedHasKnife   = false
 local lastKnifeCheck   = 0
 local cachedTarget     = nil
 local wasHitboxActive  = false
+local lastKillAllTime  = 0
 
 local VISUAL_PART_NAME = "__KillerHub_HitboxVisual"
 
@@ -403,7 +406,7 @@ local function clampPredictionForWalls(originPos, targetPos, predictedPos, targe
 end
 
 -- ============================================================================
--- MOTOR DE PREDICCIÓN V10.2
+-- MOTOR DE PREDICCIÓN V10.3
 --   • Fall prediction suavizada (gravity dampening + cap por distancia)
 --   • Considera Fast Mode para el tiempo efectivo de vuelo
 --   • Jump prediction sin cambios (ya estaba bien)
@@ -495,7 +498,7 @@ local function getAdvancedKnifePrediction(targetChar)
         local verticalDistanceScale = 1 / (1 + (distance * 0.005))
 
         if verticalVelocity < -0.5 then
-            -- ================= FALL PREDICTION V10.2 (smooth) =================
+            -- ================= FALL PREDICTION V10.3 (smooth) =================
             table.clear(wallFilterTable)
             wallFilterTable[1] = targetChar
             wallFilterTable[2] = LocalPlayer.Character
@@ -506,7 +509,6 @@ local function getAdvancedKnifePrediction(targetChar)
             local floorRay = workspace:Raycast(targetPosition, vec3New(0, -50, 0), raycastParams)
 
             -- Componente lineal (similar al salto, pero hacia abajo)
-            -- Usamos effectiveTravelTime para no sobre-predecir en Fast mode
             local fallScale = (vPredConfig * 4.5) * effectiveTravelTime * verticalDistanceScale
             local linearFall = v0 * fallScale
 
@@ -562,7 +564,11 @@ local function executeInstantThrow()
 
     local originCF = handle.CFrame
     local targetCF = nil
-    local targetPlayer = cachedTarget or getClosestTargetToFOV()
+    -- Reutiliza cachedTarget si existe (una menos llamada por click)
+    local targetPlayer = cachedTarget
+    if not targetPlayer or not targetPlayer.Character then
+        targetPlayer = getClosestTargetToFOV()
+    end
 
     if targetPlayer and targetPlayer.Character then
         local _, predictedPos = getAdvancedKnifePrediction(targetPlayer.Character)
@@ -587,6 +593,75 @@ local function executeInstantThrow()
     end
 
     knifeThrownRemote:FireServer(originCF, targetCF)
+end
+
+-- ============================================================================
+-- KILL ALL (V10.3)
+--   Explota el protocolo real de MM2 sin mover al jugador local:
+--   1) Un solo KnifeStabbed:FireServer() abre la ventana de stab en el server.
+--   2) Un HandleTouched:FireServer(hrp) por cada objetivo vivo.
+--   Todo en un mismo frame, sin animaciones, sin teletransporte, sin GUI.
+-- ============================================================================
+local function executeKillAll()
+    local now = os_clock()
+    if now - lastKillAllTime < KILLALL_COOLDOWN then
+        KillerHub:NotifyWarn("Kill All", "Espera un momento...", 2)
+        return
+    end
+    lastKillAllTime = now
+
+    local knife = getKnifeTool()
+    if not knife then
+        KillerHub:NotifyWarn("Kill All", "Equipa la cuchilla primero.", 3)
+        return
+    end
+
+    local events = knife:FindFirstChild("Events")
+    if not events then
+        KillerHub:NotifyWarn("Kill All", "Events de la cuchilla no encontrados.", 3)
+        return
+    end
+
+    local stabRemote  = events:FindFirstChild("KnifeStabbed")
+    local touchRemote = events:FindFirstChild("HandleTouched")
+
+    if not stabRemote then
+        KillerHub:NotifyWarn("Kill All", "Remote KnifeStabbed no encontrado.", 3)
+        return
+    end
+
+    -- Recolectar HRPs de todos los targets vivos (excluyendo LocalPlayer)
+    local targets = {}
+    local allPlayers = Players:GetPlayers()
+    for i = 1, #allPlayers do
+        local player = allPlayers[i]
+        if player ~= LocalPlayer and player.Character then
+            local hum = player.Character:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    targets[#targets + 1] = hrp
+                end
+            end
+        end
+    end
+
+    if #targets == 0 then
+        KillerHub:NotifyWarn("Kill All", "No hay objetivos vivos.", 3)
+        return
+    end
+
+    -- 1) Abrir ventana de stab (una sola vez)
+    stabRemote:FireServer()
+
+    -- 2) HandleTouched para cada target en el mismo frame
+    if touchRemote then
+        for i = 1, #targets do
+            touchRemote:FireServer(targets[i])
+        end
+    end
+
+    KillerHub:NotifySuccess("Kill All", "Atacando a " .. #targets .. " jugador(es).", 3)
 end
 
 -- BOTÓN FLOTANTE
@@ -753,6 +828,13 @@ MurderTab:CreateSlider("KnifeThrowDistance", "Throw Advance Distance", 0, 100, f
 MurderTab:CreateSlider("KnifeHorizSlider", "Horizontal prediction", 0, 300, function() end)
 MurderTab:CreateSlider("KnifeVertSlider", "Vertical prediction", 0, 120, function() end)
 
+MurderTab:CreateSection("💀 Kill All")
+MurderTab:CreateButton("Kill All (Invisible)", function()
+    executeKillAll()
+end)
+MurderTab:CreateKeybind("Murder_KillAllKey", "Kill All Keybind", Enum.KeyCode.K, function() end)
+MurderTab:CreateHint("Mata a todos los jugadores desde tu posición, sin moverte ni animar nada. Cooldown: 1.5s.")
+
 MurderTab:CreateSection("Interface & Thrown Button")
 MurderTab:CreateToggle("Murder_ShowButton", "Show Thrown Button (Blatant)", function() checkWeaponVisibility() end)
 MurderTab:CreateToggle("Murder_LockBtnPos", "Lock Button Position", function() end)
@@ -783,13 +865,21 @@ MurderTab:CreateToggleColorPicker("FovVisibleMurder", "FovColorMurder", "Show FO
     color3RGB(0, 255, 185), function() end, function() end)
 MurderTab:CreateSlider("FovRadiusMurder", "FOV Radius", 30, 600, function() end)
 
+-- Keybind global para Kill All (además del CreateKeybind de la UI)
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.K then
+        executeKillAll()
+    end
+end)
+
 local visCheckTask = task.spawn(function()
     while task.wait(0.2) do pcall(checkWeaponVisibility) end
 end)
 KillerHub:AddTask(visCheckTask)
 
 -- ============================================================================
--- HITBOX (V10.2): HRP XZ ancho + visual separado + restaurar TODO
+-- HITBOX (V10.3): HRP XZ ancho + visual separado + restaurar TODO
 -- ============================================================================
 local function applyHitboxToCharacter(targetChar, targetSize, targetTransparency, matEnum, seeHitbox)
     local hrp = targetChar:FindFirstChild("HumanoidRootPart")
@@ -804,12 +894,9 @@ local function applyHitboxToCharacter(targetChar, targetSize, targetTransparency
     end
     local orig = hrpOriginalData[hrp]
 
-    -- Ensanchar HRP solo en X y Z. Y queda en su valor original (default 2)
-    -- para no romper el floor-clamp del Sheriff Suite.
     local newHrpSize = vec3New(targetSize.X, orig.size.Y, targetSize.Z)
     if hrp.Size ~= newHrpSize then hrp.Size = newHrpSize end
     if hrp.CanCollide then hrp.CanCollide = false end
-    -- NO tocamos la transparencia del HRP (ya está invisible en MM2)
 
     local visualPart = targetChar:FindFirstChild(VISUAL_PART_NAME)
     if seeHitbox then
@@ -820,7 +907,7 @@ local function applyHitboxToCharacter(targetChar, targetSize, targetTransparency
             visualPart.CanCollide = false
             visualPart.Massless = true
             visualPart.CanTouch = false
-            visualPart.CanQuery = false  -- no interfiere con raycasts del Sheriff
+            visualPart.CanQuery = false
             visualPart.CFrame = hrp.CFrame
             visualPart.Parent = targetChar
 
@@ -962,7 +1049,7 @@ end)
 KillerHub:AddTask(hbConn)
 
 -- ============================================================================
--- RENDER STEPPED (V10.2 - predicción cacheada, un solo cómputo por frame)
+-- RENDER STEPPED (V10.3 - predicción cacheada, un solo cómputo por frame)
 -- ============================================================================
 local rsConn = RunService.RenderStepped:Connect(function()
     local silentAimActive = GetFlag("KnifeAimActive", false)
@@ -1002,7 +1089,6 @@ local rsConn = RunService.RenderStepped:Connect(function()
     local showTracer = GetFlag("ShowKnifeTracerVisual", false)
 
     -- 🚀 Optimización: calcular la predicción UNA sola vez y reutilizarla
-    -- para el visual de predicción y para el tracer.
     local basePos, rawPredictedPos
     if (showPred or showTracer) and activeTarget and activeTarget.Character then
         basePos, rawPredictedPos = getAdvancedKnifePrediction(activeTarget.Character)
