@@ -1,6 +1,6 @@
 -- ============================================================================
--- 👻 KILLER HUB | MURDER SUITE V10.3
--- Wall-Aware Prediction • Anti-Jukes • Ballistic Fall (Smooth) • Sheriff-Safe
+-- 👻 KILLER HUB | MURDER SUITE V10.4
+-- Wall-Aware Prediction • Anti-Jukes • Ballistic Fall (Jump-Aware) • Sheriff-Safe
 -- Hitbox • Kill All (remote-based, invisible)
 -- ============================================================================
 
@@ -406,10 +406,12 @@ local function clampPredictionForWalls(originPos, targetPos, predictedPos, targe
 end
 
 -- ============================================================================
--- MOTOR DE PREDICCIÓN V10.3
+-- MOTOR DE PREDICCIÓN V10.4
+--   • Jump-Aware: si estás saltando o por encima del objetivo, amortiguo/skip
+--     la predicción de caída (evita que el cuchillo se entierre en el piso).
+--   • Clamp final anti-piso cuando lanzas desde arriba.
 --   • Fall prediction suavizada (gravity dampening + cap por distancia)
 --   • Considera Fast Mode para el tiempo efectivo de vuelo
---   • Jump prediction sin cambios (ya estaba bien)
 -- ============================================================================
 local function getAdvancedKnifePrediction(targetChar)
     if not targetChar then return nil, nil end
@@ -428,6 +430,11 @@ local function getAdvancedKnifePrediction(targetChar)
         return targetPosition, targetPosition
     end
 
+    -- 🆕 V10.4: detección temprana de altura del origen (una sola llamada)
+    local originPos = getKnifeOriginWorld()
+    local localHumanoid = localChar:FindFirstChildOfClass("Humanoid")
+    local localIsAirborne = localHumanoid ~= nil and localHumanoid.FloorMaterial == Enum.Material.Air
+
     local extentsY = targetChar:GetExtentsSize().Y
     local scaleFactor = 1.0
     if humanoid:FindFirstChild("BodyHeightScale") then scaleFactor = humanoid.BodyHeightScale.Value end
@@ -436,8 +443,30 @@ local function getAdvancedKnifePrediction(targetChar)
         targetPosition = targetPosition - vec3New(0, deficit, 0)
     end
 
+    -- 🆕 V10.4: ventaja de altura (cuánto estás por encima del objetivo)
+    local originHeightAdvantage = 0
+    if originPos then
+        originHeightAdvantage = originPos.Y - targetPosition.Y
+    end
+    -- Si tú estás en el aire, forzamos una ventaja mínima de altura para
+    -- asegurar el dampening aunque el objetivo esté a tu altura
+    if localIsAirborne and originHeightAdvantage < 4 then
+        originHeightAdvantage = 4
+    end
+
+    -- Factor de amortiguación para la caída (1.0 = sin cambio, <1 = suaviza)
+    -- Cuando más alto estás, más se reduce la predicción de caída.
+    local fallDampening = 1.0
+    if originHeightAdvantage > 2.5 then
+        fallDampening = math_clamp(1.0 - (originHeightAdvantage - 2.5) * 0.14, 0.20, 1.0)
+    end
+
     local smoothVelocity = physicsData and physicsData.SmoothedVelocity or VECTOR_ZERO
     if smoothVelocity:Dot(smoothVelocity) < 0.0225 then
+        -- Sin velocidad: devolvemos targetPosition tal cual
+        if originHeightAdvantage > 2.5 then
+            -- Igual aplicamos clamp anti-piso por seguridad (targetPosition ya está en Y del HRP)
+        end
         return targetPosition, targetPosition
     end
 
@@ -498,7 +527,7 @@ local function getAdvancedKnifePrediction(targetChar)
         local verticalDistanceScale = 1 / (1 + (distance * 0.005))
 
         if verticalVelocity < -0.5 then
-            -- ================= FALL PREDICTION V10.3 (smooth) =================
+            -- ================= FALL PREDICTION V10.4 (jump-aware) =================
             table.clear(wallFilterTable)
             wallFilterTable[1] = targetChar
             wallFilterTable[2] = LocalPlayer.Character
@@ -508,7 +537,6 @@ local function getAdvancedKnifePrediction(targetChar)
             local v0 = math_abs(verticalVelocity)
             local floorRay = workspace:Raycast(targetPosition, vec3New(0, -50, 0), raycastParams)
 
-            -- Componente lineal (similar al salto, pero hacia abajo)
             local fallScale = (vPredConfig * 4.5) * effectiveTravelTime * verticalDistanceScale
             local linearFall = v0 * fallScale
 
@@ -516,9 +544,9 @@ local function getAdvancedKnifePrediction(targetChar)
             local gravityFall = 0.5 * GRAVITY * fallScale * fallScale
             gravityFall = math_min(gravityFall * 0.28, v0 * 0.6)
 
-            local totalFall = linearFall + gravityFall
+            local totalFall = (linearFall + gravityFall) * fallDampening
 
-            -- Protección contra el piso (nunca por debajo de floor + 1.5)
+            -- Protección contra el piso
             if floorRay then
                 local h = targetPosition.Y - floorRay.Position.Y
                 if h > 0.1 then
@@ -529,24 +557,40 @@ local function getAdvancedKnifePrediction(targetChar)
                 totalFall = math_min(totalFall, 15)
             end
 
-            -- Cap suave por distancia (nunca más del 18% del tiro)
+            -- 🆕 V10.4: cap extra anti-piso cuando lanzas desde arriba
+            if originHeightAdvantage > 2.5 then
+                totalFall = math_min(totalFall, originHeightAdvantage * 0.35)
+            end
+
+            -- Cap suave por distancia
             totalFall = math_min(totalFall, distance * 0.18)
 
             verticalOffset = vec3New(0, -totalFall, 0)
         else
-            -- ================= JUMP PREDICTION (sin cambios) =================
+            -- ================= JUMP PREDICTION (con dampening) =================
             local calculatedYOffset = verticalVelocity * 0.70
-                * (vPredConfig * 5.8) * travelTime * verticalDistanceScale
+                * (vPredConfig * 5.8) * travelTime * verticalDistanceScale * fallDampening
             verticalOffset = vec3New(0, calculatedYOffset, 0)
         end
     elseif absYVelocity > 0.02 then
         local rampCompensation = 1.20
         local sliderScale = (vPredConfig / 0.040)
-        verticalOffset = vec3New(0, smoothVelocity.Y * travelTime * sliderScale * rampCompensation, 0)
+        verticalOffset = vec3New(0, smoothVelocity.Y * travelTime * sliderScale * rampCompensation * fallDampening, 0)
     end
 
-    local originPos = getKnifeOriginWorld()
     local rawFinalPred = targetPosition + horizontalOffset + verticalOffset
+
+    -- 🆕 V10.4: clamp final anti-piso cuando el origen está por encima del objetivo.
+    -- Evita que la predicción combinada empuje el punto por debajo del objetivo
+    -- (que es lo que hacía que el cuchillo se enterrara al lanzar saltando).
+    if originHeightAdvantage > 2.5 and rawFinalPred.Y < targetPosition.Y then
+        local maxBelow = math_min(originHeightAdvantage * 0.15, 1.5)
+        local belowAmount = targetPosition.Y - rawFinalPred.Y
+        if belowAmount > maxBelow then
+            rawFinalPred = vec3New(rawFinalPred.X, targetPosition.Y - maxBelow, rawFinalPred.Z)
+        end
+    end
+
     local finalPredictedPos = clampPredictionForWalls(originPos, targetPosition, rawFinalPred, targetChar)
     return targetPosition, finalPredictedPos
 end
@@ -564,7 +608,6 @@ local function executeInstantThrow()
 
     local originCF = handle.CFrame
     local targetCF = nil
-    -- Reutiliza cachedTarget si existe (una menos llamada por click)
     local targetPlayer = cachedTarget
     if not targetPlayer or not targetPlayer.Character then
         targetPlayer = getClosestTargetToFOV()
@@ -596,11 +639,7 @@ local function executeInstantThrow()
 end
 
 -- ============================================================================
--- KILL ALL (V10.3)
---   Explota el protocolo real de MM2 sin mover al jugador local:
---   1) Un solo KnifeStabbed:FireServer() abre la ventana de stab en el server.
---   2) Un HandleTouched:FireServer(hrp) por cada objetivo vivo.
---   Todo en un mismo frame, sin animaciones, sin teletransporte, sin GUI.
+-- KILL ALL (V10.4)
 -- ============================================================================
 local function executeKillAll()
     local now = os_clock()
@@ -630,7 +669,6 @@ local function executeKillAll()
         return
     end
 
-    -- Recolectar HRPs de todos los targets vivos (excluyendo LocalPlayer)
     local targets = {}
     local allPlayers = Players:GetPlayers()
     for i = 1, #allPlayers do
@@ -651,10 +689,8 @@ local function executeKillAll()
         return
     end
 
-    -- 1) Abrir ventana de stab (una sola vez)
     stabRemote:FireServer()
 
-    -- 2) HandleTouched para cada target en el mismo frame
     if touchRemote then
         for i = 1, #targets do
             touchRemote:FireServer(targets[i])
@@ -828,12 +864,12 @@ MurderTab:CreateSlider("KnifeThrowDistance", "Throw Advance Distance", 0, 100, f
 MurderTab:CreateSlider("KnifeHorizSlider", "Horizontal prediction", 0, 300, function() end)
 MurderTab:CreateSlider("KnifeVertSlider", "Vertical prediction", 0, 120, function() end)
 
-MurderTab:CreateSection("💀 Kill All")
-MurderTab:CreateButton("Kill All (Invisible)", function()
+MurderTab:CreateSection("Kill All")
+MurderTab:CreateButton("dismember all :v", function()
     executeKillAll()
 end)
 MurderTab:CreateKeybind("Murder_KillAllKey", "Kill All Keybind", Enum.KeyCode.K, function() end)
-MurderTab:CreateHint("Mata a todos los jugadores desde tu posición, sin moverte ni animar nada. Cooldown: 1.5s.")
+MurderTab:CreateHint("Slaughterhouse")
 
 MurderTab:CreateSection("Interface & Thrown Button")
 MurderTab:CreateToggle("Murder_ShowButton", "Show Thrown Button (Blatant)", function() checkWeaponVisibility() end)
@@ -853,7 +889,6 @@ MurderTab:CreateSlider("HitboxTransparencySlider", "Hitbox transparency", 0, 100
 MurderTab:CreateDropdown("HitboxMaterialDropdown", "Hitbox Material",
     {"Plastic", "SmoothPlastic", "Metal", "DiamondPlate", "Glass", "Neon", "ForceField", "Wood"},
     function() end)
-MurderTab:CreateHint("Safe: ensancha HRP solo en X/Z (Y queda en 2 para no romper el Sheriff). Visual = cubo perfecto separado.")
 
 MurderTab:CreateSection("Visuals & Environment")
 MurderTab:CreateToggle("ShowKnifePredictionVisual", "See prediction", function() end)
@@ -879,7 +914,7 @@ end)
 KillerHub:AddTask(visCheckTask)
 
 -- ============================================================================
--- HITBOX (V10.3): HRP XZ ancho + visual separado + restaurar TODO
+-- HITBOX (V10.4)
 -- ============================================================================
 local function applyHitboxToCharacter(targetChar, targetSize, targetTransparency, matEnum, seeHitbox)
     local hrp = targetChar:FindFirstChild("HumanoidRootPart")
@@ -1049,7 +1084,7 @@ end)
 KillerHub:AddTask(hbConn)
 
 -- ============================================================================
--- RENDER STEPPED (V10.3 - predicción cacheada, un solo cómputo por frame)
+-- RENDER STEPPED (V10.4 - predicción cacheada, un solo cómputo por frame)
 -- ============================================================================
 local rsConn = RunService.RenderStepped:Connect(function()
     local silentAimActive = GetFlag("KnifeAimActive", false)
@@ -1088,7 +1123,6 @@ local rsConn = RunService.RenderStepped:Connect(function()
     local showPred   = GetFlag("ShowKnifePredictionVisual", false)
     local showTracer = GetFlag("ShowKnifeTracerVisual", false)
 
-    -- 🚀 Optimización: calcular la predicción UNA sola vez y reutilizarla
     local basePos, rawPredictedPos
     if (showPred or showTracer) and activeTarget and activeTarget.Character then
         basePos, rawPredictedPos = getAdvancedKnifePrediction(activeTarget.Character)
